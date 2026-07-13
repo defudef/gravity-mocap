@@ -11,6 +11,79 @@ This repository contains training infrastructure, not trained weights. The
 default CLI behavior is deliberately safe: download and training commands only
 print a plan until `--execute` is supplied.
 
+## Quickstart: from clone to resumable training
+
+Run these commands in order. Commands without `--execute` are safe previews and
+do not start a download or training job.
+
+1. Clone the repository and install the locked environment:
+
+   ```sh
+   git clone https://github.com/defudef/gravity-mocap.git
+   cd gravity-mocap
+   ./scripts/setup.sh
+   ```
+
+2. Check the dataset allowlist and run the forward-only model smoke test:
+
+   ```sh
+   ./scripts/mocap.sh audit
+   ./scripts/mocap.sh validate
+   ```
+
+3. Preview, download, and convert the smallest supported motion profile:
+
+   ```sh
+   ./scripts/mocap.sh download --profile smoke
+   ./scripts/mocap.sh download --profile smoke --execute
+   ./scripts/mocap.sh preprocess --profile smoke
+   ```
+
+   The smoke profile downloads the approximately 1 GiB CMU archive and one
+   selected AddBiomechanics sequence. Generated training shards are written to
+   `Saved/GravityMocap/processed/`.
+
+4. Inspect the paper-size training plan without starting it:
+
+   ```sh
+   ./scripts/train.sh
+   ```
+
+5. Start an eight-hour session that saves and stops safely:
+
+   ```sh
+   ./scripts/train.sh --execute --max-hours 8
+   ```
+
+   Run the same command again on the next night. It resumes `latest.pt`
+   automatically. Press Ctrl+C once to request a checkpoint and graceful stop.
+
+6. Watch metrics in a second terminal:
+
+   ```sh
+   ./scripts/mlflow-ui.sh
+   ```
+
+   Open [http://127.0.0.1:5000](http://127.0.0.1:5000).
+
+### Add the public mRI paired-video data
+
+The mRI download is separate from the small motion-only quickstart. It needs
+about 14.6 GiB plus temporary disk headroom and Node.js 18+ with `npx`:
+
+```sh
+./scripts/mocap.sh download --dataset mri
+./scripts/mocap.sh download --dataset mri --allow-large --execute
+```
+
+The second command opens a temporary Chrome window, needs no account or click,
+verifies both archives, and resumes partial `.part` files when repeated. The
+current generic `preprocess` command does not yet convert mRI's release-specific
+paired-video annotations. Before mRI can contribute visual supervision, those
+annotations must be normalized to the JSONL contract described in
+[Visual features](#visual-features), then encoded and attached to matching
+motion shards.
+
 ## What is implemented
 
 - closed dataset/license allowlist with fail-closed source validation;
