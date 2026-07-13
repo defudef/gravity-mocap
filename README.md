@@ -77,12 +77,14 @@ about 14.6 GiB plus temporary disk headroom and Node.js 18+ with `npx`:
 ```
 
 The second command opens a temporary Chrome window, needs no account or click,
-verifies both archives, and resumes partial `.part` files when repeated. The
-current generic `preprocess` command does not yet convert mRI's release-specific
-paired-video annotations. Before mRI can contribute visual supervision, those
-annotations must be normalized to the JSONL contract described in
-[Visual features](#visual-features), then encoded and attached to matching
-motion shards.
+verifies both archives, and resumes partial `.part` files when repeated.
+Corrupt completed or partial files are discarded and fetched again
+automatically; a failed resumed checksum triggers one clean retry from byte
+zero. The current generic `preprocess` command does not yet convert mRI's
+release-specific paired-video annotations. Before mRI can contribute visual
+supervision, those annotations must be normalized to the JSONL contract
+described in [Visual features](#visual-features), then encoded and attached to
+matching motion shards.
 
 ## What is implemented
 
@@ -165,7 +167,9 @@ Download only mRI, first as a dry-run and then for real:
 
 The execute command opens Chrome but requires no click, login, or account. If
 the connection stops, repeat the same command to obtain a fresh signed URL and
-resume the existing `.part` file.
+resume the existing `.part` file. If an existing completed or partial file fails
+the pinned size/checksum verification, it is discarded and downloaded again
+automatically.
 
 Only these raw formats are converted directly today:
 

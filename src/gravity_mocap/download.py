@@ -41,63 +41,115 @@ def verify_file(path: Path, spec: dict) -> None:
                 raise ValueError(f"Wrong {algorithm} for {path}: {actual}")
 
 
-def _check_space(destination: Path, expected_bytes: int, allow_large: bool) -> None:
+def _check_space(
+    destination: Path,
+    expected_bytes: int,
+    allow_large: bool,
+    *,
+    existing_bytes: int = 0,
+) -> None:
     destination.mkdir(parents=True, exist_ok=True)
     if expected_bytes >= LARGE_DOWNLOAD_BYTES and not allow_large:
         gib = expected_bytes / 1024**3
         raise RuntimeError(f"Refusing a {gib:.1f} GiB download without --allow-large")
     free = shutil.disk_usage(destination).free
-    if expected_bytes and free < expected_bytes * 1.1:
-        raise RuntimeError(f"Not enough free space: need 10% headroom above {expected_bytes} bytes")
+    remaining = max(expected_bytes - max(existing_bytes, 0), 0)
+    required = remaining + int(expected_bytes * 0.1)
+    if expected_bytes and free < required:
+        raise RuntimeError(
+            f"Not enough free space: need {required} bytes for the remaining download "
+            "and 10% headroom"
+        )
+
+
+def _verified_or_remove(path: Path, spec: dict) -> bool:
+    if not path.exists():
+        return False
+    try:
+        verify_file(path, spec)
+    except ValueError as error:
+        print(
+            f"[download] discarding invalid {path.name} ({error}); fetching a clean copy",
+            flush=True,
+        )
+        path.unlink()
+        return False
+    return True
 
 
 def _download_http(spec: dict, destination: Path, allow_large: bool) -> list[Path]:
     output = destination / spec["filename"]
-    if output.exists():
-        verify_file(output, spec)
+    if _verified_or_remove(output, spec):
         return [output]
     expected = int(spec.get("expected_bytes", 0))
-    _check_space(destination, expected, allow_large)
     partial = output.with_suffix(output.suffix + ".part")
+    if partial.exists() and expected and partial.stat().st_size > expected:
+        print(f"[download] discarding oversized {partial.name}", flush=True)
+        partial.unlink()
     if partial.exists() and expected and partial.stat().st_size == expected:
-        verify_file(partial, spec)
+        if _verified_or_remove(partial, spec):
+            os.replace(partial, output)
+            return [output]
+    existing_bytes = partial.stat().st_size if partial.exists() else 0
+    _check_space(destination, expected, allow_large, existing_bytes=existing_bytes)
+
+    for attempt in range(2):
+        offset = partial.stat().st_size if partial.exists() else 0
+        headers = {"Range": f"bytes={offset}-"} if offset else {}
+        action = "Resuming" if offset else "Downloading"
+        total_gib = f"{expected / 1024**3:.2f} GiB" if expected else "unknown size"
+        print(
+            f"{action} {output.name} at {offset / 1024**2:.1f} MiB / {total_gib}",
+            flush=True,
+        )
+        started = time.monotonic()
+        last_report = started
+        downloaded = offset
+        with requests.get(spec["url"], headers=headers, stream=True, timeout=(30, 120)) as response:
+            response.raise_for_status()
+            if offset and response.status_code != 206:
+                offset = 0
+                downloaded = 0
+                started = time.monotonic()
+            elif offset:
+                content_range = response.headers.get("Content-Range", "")
+                if not content_range.startswith(f"bytes {offset}-"):
+                    raise RuntimeError(
+                        f"Server returned an invalid Content-Range for {output.name}: "
+                        f"{content_range or 'missing'}"
+                    )
+            mode = "ab" if offset else "wb"
+            with partial.open(mode) as handle:
+                for chunk in response.iter_content(8 * 1024 * 1024):
+                    if chunk:
+                        handle.write(chunk)
+                        downloaded += len(chunk)
+                        now = time.monotonic()
+                        if now - last_report >= 5:
+                            elapsed = max(now - started, 0.001)
+                            speed = max(downloaded - offset, 0) / elapsed / 1024**2
+                            percent = f"{downloaded / expected * 100:.1f}%" if expected else "?"
+                            print(
+                                f"[download] {output.name}: {downloaded / 1024**3:.2f} GiB "
+                                f"({percent}) at {speed:.1f} MiB/s",
+                                flush=True,
+                            )
+                            last_report = now
+        print(f"[download] verifying {output.name}", flush=True)
+        try:
+            verify_file(partial, spec)
+        except ValueError:
+            partial.unlink(missing_ok=True)
+            if attempt == 0:
+                print(
+                    f"[download] {output.name} failed verification; retrying once from byte 0",
+                    flush=True,
+                )
+                continue
+            raise
         os.replace(partial, output)
         return [output]
-    offset = partial.stat().st_size if partial.exists() else 0
-    headers = {"Range": f"bytes={offset}-"} if offset else {}
-    action = "Resuming" if offset else "Downloading"
-    total_gib = f"{expected / 1024**3:.2f} GiB" if expected else "unknown size"
-    print(f"{action} {output.name} at {offset / 1024**2:.1f} MiB / {total_gib}", flush=True)
-    started = time.monotonic()
-    last_report = started
-    downloaded = offset
-    with requests.get(spec["url"], headers=headers, stream=True, timeout=(30, 120)) as response:
-        response.raise_for_status()
-        if offset and response.status_code != 206:
-            offset = 0
-            downloaded = 0
-            started = time.monotonic()
-        mode = "ab" if offset else "wb"
-        with partial.open(mode) as handle:
-            for chunk in response.iter_content(8 * 1024 * 1024):
-                if chunk:
-                    handle.write(chunk)
-                    downloaded += len(chunk)
-                    now = time.monotonic()
-                    if now - last_report >= 5:
-                        elapsed = max(now - started, 0.001)
-                        speed = max(downloaded - offset, 0) / elapsed / 1024**2
-                        percent = f"{downloaded / expected * 100:.1f}%" if expected else "?"
-                        print(
-                            f"[download] {output.name}: {downloaded / 1024**3:.2f} GiB "
-                            f"({percent}) at {speed:.1f} MiB/s",
-                            flush=True,
-                        )
-                        last_report = now
-    os.replace(partial, output)
-    print(f"[download] verifying {output.name}", flush=True)
-    verify_file(output, spec)
-    return [output]
+    raise AssertionError("unreachable download retry state")
 
 
 def _sanitized_process_error(result: subprocess.CompletedProcess[str]) -> str:
@@ -256,9 +308,7 @@ def _download_dryad(spec: dict, destination: Path, allow_large: bool) -> list[Pa
     outputs = [destination / file_spec["filename"] for file_spec in file_specs]
     missing: list[dict] = []
     for file_spec, output in zip(file_specs, outputs, strict=True):
-        if output.exists():
-            verify_file(output, file_spec)
-        else:
+        if not _verified_or_remove(output, file_spec):
             missing.append(file_spec)
     if not missing:
         return outputs

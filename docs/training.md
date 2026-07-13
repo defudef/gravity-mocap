@@ -106,7 +106,9 @@ For mRI alone:
 The first command remains side-effect-free and does not launch Chrome. The
 second opens and closes Chrome automatically. Repeating it after an interrupted
 connection obtains a new signed URL and resumes the `.part` file with an HTTP
-Range request before final checksum verification.
+Range request before final checksum verification. A corrupt completed or
+partial file is discarded automatically. If a resumed file fails verification,
+the downloader retries once from byte zero before reporting an error.
 
 Normalize paired-video annotations into the documented visual JSONL contract,
 train the visual encoder, extract features, and attach one feature file to the

@@ -4,10 +4,21 @@ import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from gravity_mocap import download
+
+
+def test_space_check_counts_only_missing_bytes_for_resumed_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(download.shutil, "disk_usage", lambda _path: SimpleNamespace(free=300))
+
+    download._check_space(tmp_path, 1000, allow_large=False, existing_bytes=800)
+    with pytest.raises(RuntimeError, match="remaining download"):
+        download._check_space(tmp_path, 1000, allow_large=False, existing_bytes=799)
 
 
 def test_extract_dryad_signed_url_accepts_only_expected_asset_host() -> None:
@@ -83,6 +94,55 @@ def test_http_download_resumes_partial_file_and_verifies_checksum(tmp_path: Path
     assert not partial.exists()
 
 
+def test_http_download_retries_from_zero_when_resumed_partial_is_corrupt(tmp_path: Path) -> None:
+    payload = b"clean-download" * 4096
+    requests_seen: list[str | None] = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            range_header = self.headers.get("Range")
+            requests_seen.append(range_header)
+            start = (
+                int(range_header.removeprefix("bytes=").removesuffix("-")) if range_header else 0
+            )
+            body = payload[start:]
+            self.send_response(206 if range_header else 200)
+            self.send_header("Content-Length", str(len(body)))
+            if range_header:
+                self.send_header(
+                    "Content-Range", f"bytes {start}-{len(payload) - 1}/{len(payload)}"
+                )
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    destination = tmp_path / "downloads"
+    destination.mkdir()
+    partial = destination / "fixture.zip.part"
+    partial.write_bytes(b"x" * 1234)
+    spec = {
+        "url": f"http://127.0.0.1:{server.server_port}/fixture.zip",
+        "filename": "fixture.zip",
+        "expected_bytes": len(payload),
+        "sha256": hashlib.sha256(payload).hexdigest(),
+    }
+    try:
+        outputs = download._download_http(spec, destination, allow_large=False)
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    assert requests_seen == ["bytes=1234-", None]
+    assert outputs[0].read_bytes() == payload
+    assert not partial.exists()
+
+
 def test_dryad_browser_cancels_browser_download_and_returns_matching_url(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -146,3 +206,51 @@ def test_dryad_download_skips_browser_when_verified_files_exist(
     monkeypatch.setattr(download, "_DryadBrowser", BrowserMustNotStart)
 
     assert download._download_dryad(spec, tmp_path, allow_large=False) == [output]
+
+
+def test_dryad_download_replaces_corrupt_existing_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    payload = b"replacement"
+    output = tmp_path / "dataset_release.zip"
+    output.write_bytes(b"corrupt")
+    spec = {
+        "browser_url": "https://datadryad.org/dataset/example",
+        "files": [
+            {
+                "file_id": 1,
+                "filename": output.name,
+                "expected_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        ],
+    }
+    browser_calls: list[tuple[int, str]] = []
+
+    class FakeBrowser:
+        def __init__(self, *_args: object) -> None:
+            return
+
+        def __enter__(self) -> "FakeBrowser":
+            return self
+
+        def signed_url(self, file_id: int, filename: str) -> str:
+            browser_calls.append((file_id, filename))
+            return "https://example.invalid/replacement"
+
+        def __exit__(self, *_args: object) -> None:
+            return
+
+    def fake_download_http(file_spec: dict, destination: Path, allow_large: bool) -> list[Path]:
+        del allow_large
+        replacement = destination / file_spec["filename"]
+        replacement.write_bytes(payload)
+        download.verify_file(replacement, file_spec)
+        return [replacement]
+
+    monkeypatch.setattr(download, "_DryadBrowser", FakeBrowser)
+    monkeypatch.setattr(download, "_download_http", fake_download_http)
+
+    assert download._download_dryad(spec, tmp_path, allow_large=False) == [output]
+    assert output.read_bytes() == payload
+    assert browser_calls == [(1, output.name)]
