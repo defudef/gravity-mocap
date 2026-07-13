@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 import signal
 import time
@@ -18,6 +19,7 @@ from .catalog import DatasetCatalog
 from .checkpoint import (
     TrainingProgress,
     archive_latest_checkpoint,
+    cleanup_stale_checkpoint_temps,
     compatibility_hash,
     data_bom_hash,
     load_training_checkpoint,
@@ -28,6 +30,7 @@ from .checkpoint import (
 from .data import MotionWindowDataset, audit_training_data, discover_shards
 from .losses import compute_losses
 from .model import GravityViewMotionModel
+from .tracking import MLflowTracker, ProgressLogger, resolve_tracking
 
 
 def load_config(path: Path) -> dict[str, Any]:
@@ -48,6 +51,18 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("checkpoint_every_minutes must be positive")
     if int(config["train"]["keep_last_checkpoints"]) < 1:
         raise ValueError("keep_last_checkpoints must be at least 1")
+    logging_config = config.setdefault("logging", {})
+    logging_config.setdefault("log_every_steps", 1)
+    mlflow_config = logging_config.setdefault("mlflow", {})
+    mlflow_config.setdefault("enabled", True)
+    mlflow_config.setdefault("tracking_uri", "auto")
+    mlflow_config.setdefault("experiment_name", "gravity-mocap")
+    mlflow_config.setdefault("run_name", None)
+    mlflow_config.setdefault("log_checkpoints", False)
+    if int(logging_config["log_every_steps"]) < 1:
+        raise ValueError("logging.log_every_steps must be at least 1")
+    if not str(mlflow_config["experiment_name"]).strip():
+        raise ValueError("logging.mlflow.experiment_name cannot be empty")
     return config
 
 
@@ -94,6 +109,7 @@ def training_plan(
             if int(state.get("next_epoch", 1)) > int(config["train"]["epochs"]):
                 action = "already_complete"
     ready = not license_errors and not resume_errors and inventory["shards"] > 0
+    tracking_uri, _ = resolve_tracking(config, output)
     return {
         "mode": "DRY RUN - no optimizer or training loop executed",
         "ready": ready,
@@ -121,6 +137,12 @@ def training_plan(
         "epochs": config["train"]["epochs"],
         "checkpoint_every_minutes": config["train"]["checkpoint_every_minutes"],
         "max_hours_this_session": max_hours,
+        "progress_logging": {
+            "every_optimizer_steps": config["logging"]["log_every_steps"],
+            "mlflow_enabled": config["logging"]["mlflow"]["enabled"],
+            "mlflow_tracking_uri": tracking_uri,
+            "note": "dry-run does not create an MLflow database or run",
+        },
     }
 
 
@@ -209,6 +231,8 @@ def run_training(
     scaler = torch.amp.GradScaler("cuda", enabled=use_amp)
 
     output.mkdir(parents=True, exist_ok=True)
+    logger = ProgressLogger()
+    logger.cleanup(cleanup_stale_checkpoint_temps(output))
     _write_json(output / "resolved-config.json", config)
     _write_json(output / "data-bom.json", bill_of_materials)
     resume_path = resolve_resume_path(output, resume)
@@ -250,11 +274,38 @@ def run_training(
 
     accumulation = int(config["train"]["gradient_accumulation_steps"])
     batch_size = int(config["train"]["batch_size"])
+    batches_per_epoch = len(_epoch_batches(len(dataset), batch_size, seed, 1))
+    steps_per_epoch = math.ceil(batches_per_epoch / accumulation)
+    total_steps = epochs * steps_per_epoch
+    log_every_steps = int(config["logging"]["log_every_steps"])
     checkpoint_seconds = float(config["train"]["checkpoint_every_minutes"]) * 60
     session_started = time.monotonic()
+    session_start_step = progress.global_step
     elapsed_before_session = progress.elapsed_seconds
     deadline = session_started + max_hours * 3600 if max_hours is not None else None
     last_checkpoint_at = session_started
+    tracker = MLflowTracker(
+        config=config,
+        output=output,
+        config_path=config_path,
+        data_bom=bill_of_materials,
+        logger=logger,
+    )
+    logger.start(
+        resumed=resumed_from is not None,
+        device=device,
+        parameters=model.parameter_count,
+        windows=len(dataset),
+        progress=progress,
+        epochs=epochs,
+        total_steps=total_steps,
+    )
+    progress.mlflow_run_id = tracker.start(
+        existing_run_id=progress.mlflow_run_id,
+        may_reuse_run_file=resumed_from is not None,
+        resumed_from=resumed_from,
+        device=device,
+    )
 
     def save_progress(
         *,
@@ -263,6 +314,7 @@ def run_training(
         last_loss: float | None,
         complete: bool,
         stop_reason: str | None,
+        reason: str,
     ) -> TrainingProgress:
         nonlocal last_checkpoint_at
         saved = TrainingProgress(
@@ -273,8 +325,9 @@ def run_training(
             last_loss=last_loss,
             complete=complete,
             stop_reason=stop_reason,
+            mlflow_run_id=progress.mlflow_run_id,
         )
-        save_training_checkpoint(
+        checkpoint_path = save_training_checkpoint(
             output,
             model,
             optimizer,
@@ -284,92 +337,154 @@ def run_training(
             saved,
         )
         last_checkpoint_at = time.monotonic()
+        logger.checkpoint(checkpoint_path, saved, reason=reason)
+        tracker.log_checkpoint(checkpoint_path, saved, reason=reason)
         return saved
 
     last_loss = progress.last_loss
     next_epoch = progress.next_epoch
     next_batch = progress.next_batch
-    with _StopController() as stop:
-        for epoch in range(progress.next_epoch, epochs + 1):
-            all_batches = _epoch_batches(len(dataset), batch_size, seed, epoch)
-            start_batch = progress.next_batch if epoch == progress.next_epoch else 0
-            if start_batch > len(all_batches):
-                raise RuntimeError(
-                    f"Checkpoint batch {start_batch} exceeds epoch size {len(all_batches)}"
-                )
-            if start_batch not in {len(all_batches)} and start_batch % accumulation:
-                raise RuntimeError("Checkpoint is not aligned to an optimizer-step boundary")
-            remaining_batches = all_batches[start_batch:]
-            loader = DataLoader(
-                dataset,
-                batch_sampler=remaining_batches,
-                num_workers=int(config["data"]["num_workers"]),
-            )
-            training_model.train()
-            optimizer.zero_grad(set_to_none=True)
-            for local_batch, batch in enumerate(loader):
-                absolute_batch = start_batch + local_batch
-                group_start = (absolute_batch // accumulation) * accumulation
-                group_end = min(group_start + accumulation, len(all_batches))
-                group_size = group_end - group_start
-                batch = {name: value.to(device) for name, value in batch.items()}
-                with torch.autocast(
-                    device_type=device.type,
-                    dtype=torch.float16,
-                    enabled=use_amp,
-                ):
-                    losses = compute_losses(training_model(batch), batch, config["loss"])
-                    scaled_loss = losses["total"] / group_size
-                scaler.scale(scaled_loss).backward()
-                if absolute_batch + 1 != group_end:
-                    continue
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(), float(config["train"]["grad_clip"])
-                )
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad(set_to_none=True)
-                progress.global_step += 1
-                last_loss = float(losses["total"].detach().cpu())
-                next_epoch, next_batch = epoch, absolute_batch + 1
-                if next_batch >= len(all_batches):
-                    next_epoch, next_batch = epoch + 1, 0
-
-                now = time.monotonic()
-                if deadline is not None and now >= deadline:
-                    stop.reason = "max_hours"
-                periodic = now - last_checkpoint_at >= checkpoint_seconds
-                if periodic or stop.reason is not None:
-                    progress = save_progress(
-                        next_epoch=next_epoch,
-                        next_batch=next_batch,
-                        last_loss=last_loss,
-                        complete=False,
-                        stop_reason=stop.reason,
+    try:
+        with _StopController() as stop:
+            for epoch in range(progress.next_epoch, epochs + 1):
+                epoch_metric_sums: dict[str, float] = {}
+                epoch_metric_steps = 0
+                all_batches = _epoch_batches(len(dataset), batch_size, seed, epoch)
+                start_batch = progress.next_batch if epoch == progress.next_epoch else 0
+                if start_batch > len(all_batches):
+                    raise RuntimeError(
+                        f"Checkpoint batch {start_batch} exceeds epoch size {len(all_batches)}"
                     )
-                if stop.reason is not None:
-                    return {
-                        **asdict(progress),
-                        "status": "stopped_safely",
-                        "resumed_from": resumed_from,
-                    }
-
-            progress = save_progress(
-                next_epoch=epoch + 1,
-                next_batch=0,
-                last_loss=last_loss,
-                complete=epoch == epochs,
-                stop_reason="completed" if epoch == epochs else None,
-            )
-            if epoch % int(config["train"]["checkpoint_every"]) == 0:
-                archive_latest_checkpoint(
-                    output,
-                    epoch,
-                    keep=int(config["train"]["keep_last_checkpoints"]),
+                if start_batch not in {len(all_batches)} and start_batch % accumulation:
+                    raise RuntimeError("Checkpoint is not aligned to an optimizer-step boundary")
+                remaining_batches = all_batches[start_batch:]
+                loader = DataLoader(
+                    dataset,
+                    batch_sampler=remaining_batches,
+                    num_workers=int(config["data"]["num_workers"]),
                 )
-            next_epoch, next_batch = epoch + 1, 0
+                training_model.train()
+                optimizer.zero_grad(set_to_none=True)
+                step_metrics: dict[str, float] = {}
+                for local_batch, batch in enumerate(loader):
+                    absolute_batch = start_batch + local_batch
+                    group_start = (absolute_batch // accumulation) * accumulation
+                    group_end = min(group_start + accumulation, len(all_batches))
+                    group_size = group_end - group_start
+                    if absolute_batch == group_start:
+                        step_metrics = {}
+                    batch = {name: value.to(device) for name, value in batch.items()}
+                    with torch.autocast(
+                        device_type=device.type,
+                        dtype=torch.float16,
+                        enabled=use_amp,
+                    ):
+                        losses = compute_losses(training_model(batch), batch, config["loss"])
+                        scaled_loss = losses["total"] / group_size
+                    for name, value in losses.items():
+                        detached = float(value.detach().cpu()) / group_size
+                        step_metrics[name] = step_metrics.get(name, 0.0) + detached
+                    scaler.scale(scaled_loss).backward()
+                    if absolute_batch + 1 != group_end:
+                        continue
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(
+                        model.parameters(), float(config["train"]["grad_clip"])
+                    )
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad(set_to_none=True)
+                    progress.global_step += 1
+                    last_loss = step_metrics["total"]
+                    next_epoch, next_batch = epoch, absolute_batch + 1
+                    if next_batch >= len(all_batches):
+                        next_epoch, next_batch = epoch + 1, 0
 
+                    now = time.monotonic()
+                    elapsed_seconds = elapsed_before_session + (now - session_started)
+                    for name, value in step_metrics.items():
+                        epoch_metric_sums[name] = epoch_metric_sums.get(name, 0.0) + value
+                    epoch_metric_steps += 1
+                    should_log = (
+                        progress.global_step == session_start_step + 1
+                        or progress.global_step % log_every_steps == 0
+                        or next_epoch == epoch + 1
+                    )
+                    if should_log:
+                        learning_rate = float(optimizer.param_groups[0]["lr"])
+                        logger.step(
+                            epoch=epoch,
+                            epochs=epochs,
+                            batch=group_end,
+                            batches=len(all_batches),
+                            global_step=progress.global_step,
+                            total_steps=total_steps,
+                            loss=last_loss,
+                            learning_rate=learning_rate,
+                            elapsed_seconds=elapsed_seconds,
+                        )
+                        tracker.log_step(
+                            metrics=step_metrics,
+                            global_step=progress.global_step,
+                            epoch=epoch,
+                            learning_rate=learning_rate,
+                            elapsed_seconds=elapsed_seconds,
+                        )
+
+                    if deadline is not None and now >= deadline:
+                        stop.reason = "max_hours"
+                    periodic = now - last_checkpoint_at >= checkpoint_seconds
+                    if periodic or stop.reason is not None:
+                        progress = save_progress(
+                            next_epoch=next_epoch,
+                            next_batch=next_batch,
+                            last_loss=last_loss,
+                            complete=False,
+                            stop_reason=stop.reason,
+                            reason=stop.reason or "periodic",
+                        )
+                    if stop.reason is not None:
+                        tracker.finish(status="KILLED", reason=stop.reason)
+                        logger.finish(
+                            status="stopped safely", reason=stop.reason, progress=progress
+                        )
+                        return {
+                            **asdict(progress),
+                            "status": "stopped_safely",
+                            "resumed_from": resumed_from,
+                        }
+
+                if epoch_metric_steps and start_batch == 0:
+                    tracker.log_epoch(
+                        epoch=epoch,
+                        metrics={
+                            name: value / epoch_metric_steps
+                            for name, value in epoch_metric_sums.items()
+                        },
+                        global_step=progress.global_step,
+                    )
+                progress = save_progress(
+                    next_epoch=epoch + 1,
+                    next_batch=0,
+                    last_loss=last_loss,
+                    complete=epoch == epochs,
+                    stop_reason="completed" if epoch == epochs else None,
+                    reason="completed" if epoch == epochs else "epoch",
+                )
+                if epoch % int(config["train"]["checkpoint_every"]) == 0:
+                    archive_latest_checkpoint(
+                        output,
+                        epoch,
+                        keep=int(config["train"]["keep_last_checkpoints"]),
+                    )
+                next_epoch, next_batch = epoch + 1, 0
+    except BaseException as error:
+        tracker.fail(error)
+        logger.finish(status="failed", reason=str(error), progress=progress)
+        raise
+
+    tracker.finish(status="FINISHED", reason="completed")
+    logger.finish(status="complete", reason="completed", progress=progress)
     return {
         **asdict(progress),
         "status": "complete",

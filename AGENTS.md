@@ -14,6 +14,9 @@
 - Validate changes with `./scripts/mocap.sh audit`, `./scripts/mocap.sh validate`, `./scripts/train.sh --max-hours 8`, and tests. These checks must remain forward-only and must not call `backward()` or `optimizer.step()`.
 - The user starts an overnight session with `./scripts/train.sh --execute --max-hours 8`. Repeating it resumes `latest.pt` automatically. The first Ctrl+C/SIGTERM saves at the next optimizer boundary; a second Ctrl+C aborts immediately.
 - Preserve atomic full-state checkpoints, config/BOM compatibility checks, RNG restoration, and deterministic mid-epoch resume.
+- Preserve flushed terminal progress and reuse the MLflow run ID stored in the checkpoint. Dry-runs must not create an MLflow store/run or clean checkpoint temp files.
+- The default tracker uses local SQLite below `Saved/GravityMocap/mlflow/` through `mlflow-skinny`. `scripts/mlflow-ui.sh` is a separate, isolated UI tool and must never start training.
+- Keep full checkpoint artifact logging opt-in: `logging.mlflow.log_checkpoints: false` prevents repeated large checkpoint copies while the manifest and readable state remain logged.
 
 ## License release gate
 

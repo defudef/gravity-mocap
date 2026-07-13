@@ -28,6 +28,14 @@ train:
   checkpoint_every: 1
   checkpoint_every_minutes: 1
   keep_last_checkpoints: 2
+logging:
+  log_every_steps: 1
+  mlflow:
+    enabled: true
+    tracking_uri: auto
+    experiment_name: gravity-mocap
+    run_name: null
+    log_checkpoints: false
 loss:
   rotations: 1.0
   root_velocity: 1.0

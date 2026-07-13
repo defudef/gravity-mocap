@@ -118,5 +118,54 @@ requests a save at the next optimizer boundary. A second Ctrl+C aborts without
 waiting. Increasing the target epoch count is compatible; model, data BOM,
 optimizer, loss, sequence, and seed drift fail closed.
 
+## Progress and MLflow
+
+The trainer flushes a terminal line after the first optimizer step, every
+`logging.log_every_steps` steps, and at each epoch boundary. The paper config
+uses `1`, which shows epoch/batch/global-step position, total loss, learning
+rate, step pace, elapsed time, ETA, every checkpoint save, and the final stop
+reason. This makes a slow MPS/CUDA step distinguishable from a hung process.
+
+MLflow is enabled in both training configs. With `tracking_uri: auto`, it uses:
+
+- backend: `Saved/GravityMocap/mlflow/mlflow.db`;
+- artifacts: `Saved/GravityMocap/mlflow/artifacts/`;
+- experiment: `gravity-mocap`.
+
+Start the browser UI separately; it does not start or stop training:
+
+```sh
+./scripts/mlflow-ui.sh
+# open http://127.0.0.1:5000
+```
+
+`MLFLOW_PORT=5001 ./scripts/mlflow-ui.sh` selects another port. Setting the
+standard `MLFLOW_TRACKING_URI` environment variable overrides the automatic
+local URI; an explicit config value overrides both. The project runtime pins
+`mlflow-skinny`; the UI script runs full MLflow through an isolated, pinned
+`uvx` environment so its large analytics dependency set does not enter the
+training lock/runtime.
+
+One logical training job remains one MLflow run across safe stops. Its run ID
+is written immediately to `mlflow-run.json` and included in every subsequent
+full-state checkpoint. Resume first uses the checkpoint ID and falls back to
+the JSON file for checkpoints made before MLflow support existed. A completed
+job ends as `FINISHED`; a safe `max_hours`/signal stop ends the current session
+as `KILLED`, and the next start reopens the same run; an exception records
+`FAILED` plus a bounded error tag.
+
+Step metrics contain each loss component, total loss, epoch, learning rate,
+elapsed seconds, and steps per second. Epoch means are logged separately.
+Artifacts contain the resolved config, data BOM, readable training state, and
+a checkpoint manifest with path, size, reason, and progress. To avoid copying a
+large checkpoint on every periodic/epoch save, the `.pt` itself is not copied
+unless `logging.mlflow.log_checkpoints: true` is explicitly configured.
+
+Dry-run planning resolves and prints the intended MLflow URI but does not import
+MLflow, create a database, create a run, delete stale files, construct an
+optimizer, or enter the training loop. On an actual execution, stale atomic
+save remnants (`latest.pt.tmp`, `training-state.json.tmp`, and epoch archive
+temps) are removed before the committed checkpoint is resolved.
+
 Omitting `--execute` prints the resume decision and never creates an optimizer
 or enters a training loop.

@@ -29,6 +29,22 @@ class TrainingProgress:
     last_loss: float | None = None
     complete: bool = False
     stop_reason: str | None = None
+    mlflow_run_id: str | None = None
+
+
+def cleanup_stale_checkpoint_temps(output: Path) -> list[Path]:
+    """Remove files that were never atomically promoted after an interrupted save."""
+    candidates = [
+        output / f"{LATEST_CHECKPOINT}.tmp",
+        output / f"{STATE_FILE}.tmp",
+        *output.glob("epoch-*.pt.tmp"),
+    ]
+    removed = []
+    for path in candidates:
+        if path.exists():
+            path.unlink()
+            removed.append(path)
+    return removed
 
 
 def compatibility_payload(config: dict[str, Any]) -> dict[str, Any]:

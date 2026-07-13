@@ -39,11 +39,12 @@ orientation, or another parametric body model.
 
 Dependencies are installed from their publishers and are not vendored or
 relicensed. Direct runtime dependencies are permissive: PyTorch (its upstream
-BSD-style license plus the notices included in the wheel), NumPy (BSD-3-Clause and included permissive
-notices), Pillow (MIT-CMU), PyYAML (MIT), Requests (Apache-2.0), gdown (MIT),
-huggingface-hub (Apache-2.0), remotezip (MIT), and nimblephysics (a BSD-style
-three-clause license in the wheel, despite its `MIT` package metadata; its
-included Rajagopal model notice is MIT).
+BSD-style license plus the notices included in the wheel), NumPy (BSD-3-Clause
+and included permissive notices), Pillow (MIT-CMU), PyYAML (MIT), Requests
+(Apache-2.0), gdown (MIT), huggingface-hub (Apache-2.0), remotezip (MIT),
+nimblephysics (a BSD-style three-clause license in the wheel, despite its `MIT`
+package metadata; its included Rajagopal model notice is MIT), MLflow Skinny
+(Apache-2.0), SQLAlchemy (MIT), and Alembic (MIT).
 
 The resolved transitive environment also contains `certifi` under MPL-2.0 and
 `tqdm` under its MIT/MPL dual license. They are separate dynamically installed
@@ -51,6 +52,16 @@ packages, not copied into this source. Linux PyTorch resolution may download
 NVIDIA CUDA/cuDNN/NCCL wheels governed by NVIDIA's separate terms. Do not bundle
 or redistribute dependency wheels under Apache-2.0; retain the notices shipped
 inside any binary distribution.
+
+MLflow tracking deliberately uses `mlflow-skinny` plus the MIT SQLite adapter
+stack, not full MLflow. The resolved training environment was checked for
+AGPL/GPL/LGPL license classifiers after this change and none were reported.
+`scripts/mlflow-ui.sh` runs full Apache-2.0 MLflow in a separate pinned `uvx`
+tool environment only when an operator asks for the browser UI. That optional
+tool downloads additional analytics packages, including binary components with
+their own notices; it is not imported by training, embedded in checkpoints, or
+part of the locked training environment. Do not redistribute the `uvx` cache as
+if it were Apache-2.0 project output.
 
 ## Checkpoint release gate
 

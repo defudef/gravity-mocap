@@ -6,14 +6,17 @@ readme = "README.md"
 license = "Apache-2.0"
 requires-python = ">=3.11,<3.13"
 dependencies = [
+  "alembic>=1.18.0,<2.0",
   "gdown>=5.2.0",
   "huggingface-hub>=0.34.0",
+  "mlflow-skinny>=3.14.0,<4.0",
   "nimblephysics>=0.10.52.1",
   "numpy>=2.0.0",
   "pillow>=11.0.0",
   "pyyaml>=6.0.2",
   "remotezip>=0.12.3",
   "requests>=2.32.0",
+  "sqlalchemy>=2.0.0,<3.0",
   "torch>=2.5.0",
 ]
 

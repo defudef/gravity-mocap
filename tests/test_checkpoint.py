@@ -8,6 +8,7 @@ import yaml
 
 from gravity_mocap.checkpoint import (
     TrainingProgress,
+    cleanup_stale_checkpoint_temps,
     compatibility_hash,
     load_training_checkpoint,
     read_training_state,
@@ -38,6 +39,7 @@ def test_checkpoint_round_trip_restores_full_state_without_training(tmp_path: Pa
         elapsed_seconds=456.5,
         last_loss=0.75,
         stop_reason="SIGINT",
+        mlflow_run_id="test-run-id",
     )
     random.seed(10)
     np.random.seed(11)
@@ -106,6 +108,28 @@ def test_epoch_limit_can_change_but_optimizer_settings_cannot() -> None:
         "train": {**config["train"], "learning_rate": 0.0001},
     }
     assert compatibility_hash(changed_lr) != compatibility_hash(config)
+    changed_logging = {
+        **config,
+        "logging": {**config["logging"], "log_every_steps": 20},
+    }
+    assert compatibility_hash(changed_logging) == compatibility_hash(config)
+
+
+def test_cleanup_removes_only_uncommitted_checkpoint_temps(tmp_path: Path) -> None:
+    latest = tmp_path / "latest.pt"
+    latest.write_bytes(b"valid")
+    latest_temp = tmp_path / "latest.pt.tmp"
+    latest_temp.write_bytes(b"partial")
+    state_temp = tmp_path / "training-state.json.tmp"
+    state_temp.write_text("partial")
+    archive_temp = tmp_path / "epoch-0005.pt.tmp"
+    archive_temp.write_bytes(b"partial")
+
+    removed = cleanup_stale_checkpoint_temps(tmp_path)
+
+    assert set(removed) == {latest_temp, state_temp, archive_temp}
+    assert latest.read_bytes() == b"valid"
+    assert all(not path.exists() for path in removed)
 
 
 def test_training_plan_never_constructs_an_optimizer(
@@ -128,3 +152,5 @@ def test_training_plan_never_constructs_an_optimizer(
     assert plan["ready"] is True
     assert plan["action_on_execute"] == "start_new"
     assert plan["max_hours_this_session"] == 8
+    assert plan["progress_logging"]["mlflow_enabled"] is True
+    assert not (tmp_path / "run" / "mlflow" / "mlflow.db").exists()
