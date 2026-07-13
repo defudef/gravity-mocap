@@ -17,6 +17,8 @@
 - Preserve flushed terminal progress and reuse the MLflow run ID stored in the checkpoint. Dry-runs must not create an MLflow store/run or clean checkpoint temp files.
 - The default tracker uses local SQLite below `Saved/GravityMocap/mlflow/` through `mlflow-skinny`. `scripts/mlflow-ui.sh` is a separate, isolated UI tool and must never start training.
 - Keep full checkpoint artifact logging opt-in: `logging.mlflow.log_checkpoints: false` prevents repeated large checkpoint copies while the manifest and readable state remain logged.
+- mRI execution uses pinned `@playwright/cli` in a temporary headed Chrome session to pass Dryad's public browser challenge, cancel the browser download, and obtain a short-lived signed S3 URL. Preserve resumable `.part` transfer and size/SHA-256 verification; never persist challenge cookies or signed URLs.
+- Dry-run downloads must not launch Chrome, install a browser, or create raw-data directories. Browser-assisted integration tests must use the 4.4 KB public mRI README, never either large archive.
 
 ## License release gate
 

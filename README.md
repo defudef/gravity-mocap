@@ -72,13 +72,27 @@ spatial audio, not video. A single source can be selected with
 
 `smoke` selects only one tiny B3D member from the remote AddBiomechanics ZIP,
 but the CMU archive is still about 1 GiB. `core` adds selected B3D members, SAM,
-and mRI. Dryad currently rejects anonymous CLI downloads: open the public mRI
-page shown by the command and download both `dataset_release.zip` and
-`blurred_videos.zip` without creating an account. Place them at the exact
-printed paths; the pipeline verifies Dryad's SHA-256 values. The pretrained
-`.pkl` files shipped inside `dataset_release.zip` are ignored and must not be
-used. `expanded` also includes HUM4D paired video and TUM radar/3D-pose motion;
-TUM requires reading and explicitly accepting its Data Usage Agreement.
+and mRI. The public mRI archives are downloaded automatically without an
+account: a temporary visible Chrome window passes Dryad's intended browser
+challenge, captures a short-lived signed asset URL, cancels the browser
+transfer, and hands the URL to the resumable HTTP downloader. Node.js 18+ with
+`npx` is required only for this Dryad step. The window closes automatically,
+partial `.part` files survive interruption, and every completed archive is
+checked against Dryad's pinned size and SHA-256. The pretrained `.pkl` files
+shipped inside `dataset_release.zip` are ignored and must not be used.
+`expanded` also includes HUM4D paired video and TUM radar/3D-pose motion; TUM
+requires reading and explicitly accepting its Data Usage Agreement.
+
+Download only mRI, first as a dry-run and then for real:
+
+```sh
+./scripts/mocap.sh download --dataset mri
+./scripts/mocap.sh download --dataset mri --allow-large --execute
+```
+
+The execute command opens Chrome but requires no click, login, or account. If
+the connection stops, repeat the same command to obtain a fresh signed URL and
+resume the existing `.part` file.
 
 Only these raw formats are converted directly today:
 

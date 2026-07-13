@@ -17,6 +17,7 @@ def test_catalog_is_closed_and_auditable() -> None:
     assert catalog.datasets["sam"].task == "motion"
     assert catalog.datasets["tum_preha"].task == "motion"
     assert catalog.datasets["mri"].task == "paired_video"
+    assert catalog.datasets["mri"].downloader["type"] == "dryad_browser"
     assert {item["filename"] for item in catalog.datasets["mri"].downloader["files"]} == {
         "dataset_release.zip",
         "blurred_videos.zip",

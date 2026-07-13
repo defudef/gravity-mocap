@@ -25,6 +25,7 @@ outputs/
 *.amc
 *.asf
 *.zip
+*.part
 *.rar
 *.7z
 *.mp4

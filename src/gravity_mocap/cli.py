@@ -65,22 +65,6 @@ def command_download(args: argparse.Namespace) -> int:
     if not args.execute:
         print("DRY RUN: nothing downloaded. Add --execute to perform these downloads.")
         return 0
-    missing_manual = []
-    for entry in entries:
-        spec = entry.downloader
-        if spec["type"] == "dryad_manual":
-            for file_spec in spec.get("files", [spec]):
-                expected = args.root / entry.dataset_id / file_spec["filename"]
-                if not expected.exists():
-                    missing_manual.append(
-                        f"{entry.dataset_id}/{file_spec['filename']}: "
-                        f"{spec['browser_url']} -> {expected}"
-                    )
-    if missing_manual:
-        raise RuntimeError(
-            "Complete the public browser download(s) before executing the profile: "
-            + "; ".join(missing_manual)
-        )
     for entry in entries:
         outputs = download_dataset(
             entry,

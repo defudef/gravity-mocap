@@ -62,7 +62,7 @@ datasets:
     approved_for_training: true
     attribution_required: false
     downloader:
-      type: dryad_manual
+      type: dryad_browser
       browser_url: https://datadryad.org/dataset/doi:10.5061/dryad.9ghx3ffpp
       files:
         - file_id: 2738858

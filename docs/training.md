@@ -81,17 +81,32 @@ Plan data acquisition:
 ./scripts/mocap.sh download --profile core
 ```
 
-The mRI release is public and does not require an account, but Dryad rejects
-anonymous scripted downloads. Download `dataset_release.zip` and
-`blurred_videos.zip` in a browser from the URL printed by the command and place
-both at their printed paths. Their published SHA-256 values are pinned and
-checked. Do not use the pretrained `.pkl` models included in the release. Then
-run:
+The mRI release is public and requires no account. Dryad places a JavaScript
+browser challenge in front of the file stream, so the downloader launches a
+temporary headed Chrome session through pinned Apache-2.0 `@playwright/cli`.
+Chrome passes the challenge and yields a signed Dryad S3 URL; its own download
+is cancelled, and the existing HTTP path performs the actual resumable transfer
+into `Saved/GravityMocap/raw/mri/*.part`. The browser session is temporary and
+stores no project credential. Node.js 18+ and `npx` must be on `PATH` for this
+step. Published sizes and SHA-256 values remain pinned and checked. Do not use
+the pretrained `.pkl` models included in the release. Run:
 
 ```sh
 ./scripts/mocap.sh download --profile core --allow-large --execute
 ./scripts/mocap.sh preprocess --profile core
 ```
+
+For mRI alone:
+
+```sh
+./scripts/mocap.sh download --dataset mri
+./scripts/mocap.sh download --dataset mri --allow-large --execute
+```
+
+The first command remains side-effect-free and does not launch Chrome. The
+second opens and closes Chrome automatically. Repeating it after an interrupted
+connection obtains a new signed URL and resumes the `.part` file with an HTTP
+Range request before final checksum verification.
 
 Normalize paired-video annotations into the documented visual JSONL contract,
 train the visual encoder, extract features, and attach one feature file to the

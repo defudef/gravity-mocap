@@ -63,6 +63,24 @@ their own notices; it is not imported by training, embedded in checkpoints, or
 part of the locked training environment. Do not redistribute the `uvx` cache as
 if it were Apache-2.0 project output.
 
+The optional automated mRI download path invokes pinned `@playwright/cli`
+0.1.17 (Apache-2.0) through an operator's Node.js/npm installation. It is not a
+Python runtime dependency, is not imported by model training, and runs only
+after explicit `download --execute`. A temporary local Chrome/Chromium process
+passes Dryad's public browser challenge without credentials, and the project
+stores neither challenge cookies nor signed URLs. Browser binaries and Node
+dependencies retain their own licenses and must not be redistributed as this
+project's Apache-2.0 source.
+
+Dryad's current [End User Terms](https://datadryad.org/terms) allow and
+encourage reuse of published datasets while prohibiting use that impairs the
+service or compromises its security/functionality. The downloader follows the
+normal public browser challenge once per session, uses the resulting official
+signed asset URL for one sequential transfer, and does not evade rate limits,
+parallelize ranges, retain session credentials, or alter the challenge. Stop
+using the automated path if Dryad changes its terms or explicitly asks clients
+not to automate this flow.
+
 ## Checkpoint release gate
 
 Apache-2.0 applies automatically only to this source. Before releasing a trained
