@@ -1,0 +1,115 @@
+schema_version: 1
+
+profiles:
+  smoke:
+    datasets: [cmu_mocap, addbiomechanics]
+    note: Tiny, selective downloads for validating the data path.
+  core:
+    datasets: [cmu_mocap, addbiomechanics, sam, mri]
+    note: Practical first corpus; three motion sources plus public paired mRI video.
+  expanded:
+    datasets: [cmu_mocap, addbiomechanics, sam, mri, hum4d, tum_preha]
+    note: Adds HUM4D paired video and TUM motion with explicit data-use acceptance.
+
+datasets:
+  cmu_mocap:
+    title: CMU Graphics Lab Motion Capture Database
+    task: motion
+    license_id: CMU-MOCAP
+    license_url: https://mocap.cs.cmu.edu/faqs.php
+    approved_for_training: true
+    attribution_required: true
+    downloader:
+      type: http
+      url: https://mocap.cs.cmu.edu/allasfamc.zip
+      filename: allasfamc.zip
+      expected_bytes: 1083549385
+
+  addbiomechanics:
+    title: AddBiomechanics Dataset
+    task: motion
+    license_id: CC-BY-4.0
+    license_url: https://addbiomechanics.org/data_sharing_mission.html
+    approved_for_training: true
+    attribution_required: true
+    downloader:
+      type: remote_zip_members
+      url: http://archive.simtk.org/addbiomechanics/addbiomechanics.zip
+      archive_bytes: 417665422113
+      member_regex: '^test/With_Arm/.+\.b3d$'
+      smoke_members:
+        - test/With_Arm/Hammer2013_Formatted_With_Arm/subject10/subject10.b3d
+      max_core_members: 12
+
+  sam:
+    title: SAM Spatial Audio-driven Human Motion Dataset
+    task: motion
+    license_id: CC-BY-4.0
+    license_url: https://huggingface.co/datasets/JimSYXu/SAM
+    approved_for_training: true
+    attribution_required: true
+    downloader:
+      type: huggingface
+      repo_id: JimSYXu/SAM
+      filename: SAM.tar.gz
+      expected_bytes: 25200000000
+
+  mri:
+    title: mRI Monocular Full-Body Human Motion Recovery Dataset
+    task: paired_video
+    license_id: CC0-1.0
+    license_url: https://doi.org/10.5061/dryad.9ghx3ffpp
+    approved_for_training: true
+    attribution_required: false
+    downloader:
+      type: dryad_manual
+      browser_url: https://datadryad.org/dataset/doi:10.5061/dryad.9ghx3ffpp
+      files:
+        - file_id: 2738858
+          filename: dataset_release.zip
+          expected_bytes: 680028517
+          sha256: 4f603af77cd16c5da0eba30fbc33bfa19101d7fea7ba3bbba5ed6789a77f83c0
+        - file_id: 2738861
+          filename: blurred_videos.zip
+          expected_bytes: 14988106753
+          sha256: 1a95d3993d564ba028aa7f7f53c1a23ac35edd4f7196a951399529738873149e
+
+  hum4d:
+    title: HUM4D Human Motion Dataset
+    task: paired_video
+    license_id: CC-BY-4.0
+    license_url: https://parkyeeun23.github.io/HUM4D/
+    approved_for_training: true
+    attribution_required: true
+    downloader:
+      type: gdrive_folder
+      folder_url: https://drive.google.com/drive/folders/1OnaU6yBmZEyM6ZM0C2IOoWplgkLKpo6P
+
+  tum_preha:
+    title: TUM Prehabilitation Exercise Dataset
+    task: motion
+    license_id: CC-BY-4.0+DUA
+    license_url: https://zenodo.org/records/19866202
+    approved_for_training: true
+    attribution_required: true
+    requires_acceptance: true
+    downloader:
+      type: http
+      url: https://zenodo.org/api/records/19866202/files/Dataset.rar/content
+      filename: Dataset.rar
+      expected_bytes: 21661187131
+      md5: 019f878336815a61ba59a5b6c6de39a1
+
+blocked_sources:
+  - id: amass
+    reason: Aggregated source with per-component terms; excluded from the clean allowlist.
+  - id: bedlam
+    reason: Research/non-commercial terms; excluded from commercial-clean training.
+  - id: h36m
+    reason: Restricted access and research terms; excluded.
+  - id: 3dpw
+    reason: Research-only terms; excluded.
+  - id: humanml3d
+    reason: Inherits licensing constraints from constituent datasets; excluded.
+  - id: gvhmr_repo
+    reason: Reference implementation is non-commercial; no code or weights may enter this project.

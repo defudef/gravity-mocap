@@ -1,0 +1,69 @@
+# Engineering license audit
+
+Snapshot: 2026-07-13. This is an engineering provenance review, not legal
+advice, a patent/FTO search, or a guarantee about how a court would classify
+trained weights.
+
+## Result
+
+No known research-only, non-commercial, GPL/AGPL, SMPL, or SMPL-X component is
+included in the default training implementation or loaded into a checkpoint.
+That conclusion depends on the fail-closed rules below and on distributing
+source, datasets, dependencies, and checkpoints under their own terms.
+
+The source in this project is Apache-2.0. The method and coordinate formulation
+are independently implemented from the public
+[GVHMR paper](https://arxiv.org/abs/2409.06662). The project is not affiliated
+with or endorsed by the GVHMR authors. The
+[GVHMR repository license](https://github.com/zju3dv/GVHMR/blob/main/LICENSE)
+limits its software to educational, research, and non-profit use, so its code,
+configs, weights, caches, and derived SMPL parameters are explicitly blocked.
+
+## Dataset allowlist
+
+| Source | Terms used by this project | Approved role | Required handling |
+| --- | --- | --- | --- |
+| [CMU Mocap](https://mocap.cs.cmu.edu/) | CMU permits all uses and inclusion in commercial products, but not resale of the data itself | motion | Preserve CMU acknowledgement; do not redistribute the raw/converted dataset as a product |
+| [AddBiomechanics data](https://addbiomechanics.org/data_sharing_mission.html) | CC BY 4.0 | motion | Preserve per-dataset `DATA_CITATIONS.txt` and attribution; the AddBiomechanics application is GPLv3 but its code is not used |
+| [SAM](https://huggingface.co/datasets/JimSYXu/SAM) | CC BY 4.0 | motion + spatial audio | Attribute the dataset; it is not paired video |
+| [mRI](https://datadryad.org/dataset/doi:10.5061/dryad.9ghx3ffpp) | CC0 1.0 | paired blurred RGB + 3D/2D pose | Require both pinned archives; ignore bundled pretrained `.pkl` models |
+| [HUM4D](https://parkyeeun23.github.io/HUM4D/) | CC BY 4.0 | paired RGB-D + Vicon joints | Use only imagery/calibration/joints; SMPL/SMPL-X parameters are prohibited |
+| [TUM prehabilitation](https://zenodo.org/records/19866202) | CC BY 4.0 plus Data Usage Agreement | radar + camera-derived 3D pose | Explicit acceptance, DOI attribution, no re-identification/contact/tracking/profiling; released files are not paired RGB supervision |
+
+AMASS, BEDLAM, Human3.6M, 3DPW, HumanML3D, and the GVHMR repository remain
+blocked. Unknown `source_id` or license IDs fail closed. Generic NPZ input is
+rejected when any field name indicates SMPL, SMPL-X, body pose/shape, global
+orientation, or another parametric body model.
+
+## Python and GPU dependencies
+
+Dependencies are installed from their publishers and are not vendored or
+relicensed. Direct runtime dependencies are permissive: PyTorch (its upstream
+BSD-style license plus the notices included in the wheel), NumPy (BSD-3-Clause and included permissive
+notices), Pillow (MIT-CMU), PyYAML (MIT), Requests (Apache-2.0), gdown (MIT),
+huggingface-hub (Apache-2.0), remotezip (MIT), and nimblephysics (a BSD-style
+three-clause license in the wheel, despite its `MIT` package metadata; its
+included Rajagopal model notice is MIT).
+
+The resolved transitive environment also contains `certifi` under MPL-2.0 and
+`tqdm` under its MIT/MPL dual license. They are separate dynamically installed
+packages, not copied into this source. Linux PyTorch resolution may download
+NVIDIA CUDA/cuDNN/NCCL wheels governed by NVIDIA's separate terms. Do not bundle
+or redistribute dependency wheels under Apache-2.0; retain the notices shipped
+inside any binary distribution.
+
+## Checkpoint release gate
+
+Apache-2.0 applies automatically only to this source. Before releasing a trained
+checkpoint:
+
+1. retain the generated `data-bom.json`, resolved config, and source hashes;
+2. publish a model card listing every dataset, license, DOI/citation, changes,
+   and prohibited-use conditions;
+3. include all CC BY and CMU acknowledgements and the TUM ethical restrictions
+   when those sources are present;
+4. verify that no dataset files, frames, SMPL/SMPL-X parameters, third-party
+   weights, or dependency binaries are embedded in the release;
+5. obtain a focused legal review if the checkpoint will be commercially
+   distributed, because whether training output is an adaptation of input data
+   is jurisdiction- and fact-dependent.

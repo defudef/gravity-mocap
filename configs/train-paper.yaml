@@ -1,0 +1,40 @@
+seed: 1337
+data:
+  catalog: datasets.yaml
+  root: ../Saved/GravityMocap/processed
+  allow_synthetic: false
+  sequence_length: 120
+  stride: 60
+  num_workers: 4
+model:
+  joints: 22
+  image_feature_dim: 512
+  hidden_dim: 512
+  layers: 12
+  heads: 8
+  mlp_ratio: 4
+  dropout: 0.1
+  attention_radius: 120
+train:
+  batch_size: 16
+  gradient_accumulation_steps: 16
+  effective_batch_size: 256
+  mixed_precision: true
+  epochs: 500
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  grad_clip: 1.0
+  device: auto
+  checkpoint_every: 5
+  checkpoint_every_minutes: 15
+  keep_last_checkpoints: 3
+loss:
+  rotations: 1.0
+  root_velocity: 1.0
+  orientation: 1.0
+  camera_orientation: 1.0
+  weak_camera: 1.0
+  contacts: 0.1
+  joints_3d: 1.0
+  reprojection_2d: 0.1
+  smoothness: 0.05
