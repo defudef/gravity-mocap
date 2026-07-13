@@ -202,13 +202,26 @@ MPJPE, root-velocity error, integrated local root drift, acceleration error,
 and contact F1. The split fraction, split seed, target FPS, and augmentation
 settings are checkpoint compatibility inputs.
 
+The paper config performs early stopping on held-out `loss.total`. A validation
+must improve the saved best by at least `0.001` to reset patience. Twenty
+consecutive validation checks without such an improvement stop the logical job
+successfully, mark it `FINISHED` in MLflow, and leave `best.pt` pointing at the
+best full-state checkpoint. `latest.pt` still records the final stopping point.
+Best loss, best epoch, and the patience counter are checkpointed, so
+`--max-hours`, `--max-epochs`, Ctrl+C, and later resume do not reset them.
+Resuming a checkpoint made before early-stopping support seeds the baseline from
+its matching `validation-state.json` and starts patience at zero.
+
 ## Progress and MLflow
 
 The trainer flushes a terminal line after the first optimizer step, every
 `logging.log_every_steps` steps, and at each epoch boundary. The paper config
 uses `1`, which shows epoch/batch/global-step position, total loss, learning
 rate, step pace, elapsed time, ETA, every checkpoint save, and the final stop
-reason. This makes a slow MPS/CUDA step distinguishable from a hung process.
+reason. Validation prints an explicit `START` line followed by a `DONE` summary
+with validation loss, MPJPE, root drift, contact F1, duration, best loss, and
+current early-stopping patience. This makes a slow MPS/CUDA step or validation
+pass distinguishable from a hung process.
 
 MLflow is enabled in both training configs. With `tracking_uri: auto`, it uses:
 
@@ -234,9 +247,10 @@ One logical training job remains one MLflow run across safe stops. Its run ID
 is written immediately to `mlflow-run.json` and included in every subsequent
 full-state checkpoint. Resume first uses the checkpoint ID and falls back to
 the JSON file for checkpoints made before MLflow support existed. A completed
-job ends as `FINISHED`; a safe `max_hours`/`max_epochs`/signal stop ends the
-current session as `KILLED`, and the next start reopens the same run; an
-exception records `FAILED` plus a bounded error tag.
+or early-stopped job ends as `FINISHED`; a safe
+`max_hours`/`max_epochs`/signal stop ends the current session as `KILLED`, and
+the next start reopens the same run; an exception records `FAILED` plus a
+bounded error tag.
 
 Step metrics contain each loss component, total loss, epoch, learning rate,
 elapsed seconds, and steps per second. Epoch means and held-out validation
@@ -249,8 +263,8 @@ unless `logging.mlflow.log_checkpoints: true` is explicitly configured.
 Dry-run planning resolves and prints the intended MLflow URI but does not import
 MLflow, create a database, create a run, delete stale files, construct an
 optimizer, or enter the training loop. On an actual execution, stale atomic
-save remnants (`latest.pt.tmp`, `training-state.json.tmp`, and epoch archive
-temps) are removed before the committed checkpoint is resolved.
+save remnants (`latest.pt.tmp`, `best.pt.tmp`, `training-state.json.tmp`, and
+epoch archive temps) are removed before the committed checkpoint is resolved.
 
 Omitting `--execute` prints the resume decision and never creates an optimizer
 or enters a training loop.

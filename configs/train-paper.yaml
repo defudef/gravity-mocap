@@ -47,6 +47,11 @@ validation:
   enabled: true
   every_epochs: 1
   batch_size: 32
+  early_stopping:
+    enabled: true
+    monitor: loss.total
+    patience: 20
+    min_delta: 0.001
 logging:
   log_every_steps: 1
   mlflow:

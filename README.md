@@ -131,7 +131,8 @@ matching motion shards.
 - simulated full camera motion, bbox, and 2D-keypoint inputs for motion-only sequences;
 - deterministic detector corruption (noise, low confidence, missing joints,
   occlusion, bbox jitter, and optional unknown-camera input);
-- source-stratified, subject/sequence-disjoint validation with 3D motion metrics;
+- source-stratified, subject/sequence-disjoint validation with 3D motion metrics,
+  resumable early stopping, and an atomic best checkpoint;
 - neutral skeleton local rotations, root motion, and six stationary contacts;
 - early-fusion relative Transformer with RoPE and the paper-size 12-layer,
   8-head, 512-hidden configuration;
@@ -330,7 +331,12 @@ never receives detector corruption and runs after every completed epoch. It
 logs held-out component losses, MPJPE, root-velocity error, integrated local
 root drift, acceleration error, and contact F1 to MLflow and writes the latest
 snapshot to `validation-state.json`. No validation window comes from a training
-subject/sequence holdout unit.
+subject/sequence holdout unit. The paper config monitors `loss.total` with
+`min_delta: 0.001` and stops after 20 consecutive validations without a
+meaningful improvement. The counter and best epoch/loss live in the full-state
+checkpoint, so session limits and resume do not reset patience. Each improvement
+atomically promotes `latest.pt` to `best.pt`; early stopping ends the MLflow run
+as `FINISHED`.
 
 Training prints one line per optimizer step by default, so a healthy run is
 immediately visible:
@@ -339,6 +345,8 @@ immediately visible:
 [train] RESUME | device=mps | parameters=... | windows=... | epoch=8/500 | step=7/500
 [mlflow] run=... | experiment=gravity-mocap | tracking=sqlite:////.../mlflow.db
 [train] epoch 8/500 | batch 1/1 | step 8/500 | loss 0.369439 | lr 2.00e-04 | warming up | elapsed 1m 01s | ETA 1h 03m
+[validation] START | epoch 8/500 | windows=1,025
+[validation] DONE | epoch 8/500 | val_loss=0.488491 | MPJPE=29.73cm | root_drift=59.97cm | contact_F1=0.2500 | time=26s | best=0.488491 | IMPROVED | early_stop=0/20
 ```
 
 Open the local MLflow UI in a second terminal:
@@ -363,9 +371,10 @@ run. Full checkpoint upload is off by default to avoid duplicating a roughly
 that storage cost is intentional. `logging.log_every_steps` controls terminal
 and step-metric frequency. A dry-run never creates the MLflow database or run.
 
-An interrupted atomic checkpoint write can leave `latest.pt.tmp`. The next real
-training execution deletes stale checkpoint temporary files before loading the
-last committed `latest.pt`; dry-runs remain read-only.
+An interrupted atomic checkpoint write can leave `latest.pt.tmp` or
+`best.pt.tmp`. The next real training execution deletes stale checkpoint
+temporary files before loading the last committed `latest.pt`; dry-runs remain
+read-only.
 
 Checkpoints and resolved configuration are written below
 `Saved/GravityMocap/runs/motion/`. Training is intentionally never invoked by

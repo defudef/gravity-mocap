@@ -37,6 +37,22 @@ def test_progress_logger_prints_immediately_readable_progress() -> None:
         learning_rate=0.0002,
         elapsed_seconds=61.3,
     )
+    logger.validation_start(epoch=8, epochs=500, windows=1025)
+    logger.validation(
+        epoch=8,
+        epochs=500,
+        metrics={
+            "loss.total": 0.488491,
+            "mpjpe_m": 0.29733,
+            "root_local_drift_m": 0.59966,
+            "contact_f1": 0.25,
+        },
+        elapsed_seconds=25.6,
+        improved=True,
+        best_loss=0.488491,
+        validations_without_improvement=0,
+        patience=20,
+    )
 
     output = stream.getvalue()
     assert "[train] RESUME" in output
@@ -44,6 +60,10 @@ def test_progress_logger_prints_immediately_readable_progress() -> None:
     assert "step 8/500" in output
     assert "loss 0.369439" in output
     assert "ETA" in output
+    assert "[validation] START | epoch 8/500 | windows=1,025" in output
+    assert "val_loss=0.488491" in output
+    assert "MPJPE=29.73cm" in output
+    assert "early_stop=0/20" in output
     assert format_duration(3661) == "1h 01m"
 
 

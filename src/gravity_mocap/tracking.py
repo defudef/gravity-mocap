@@ -153,12 +153,46 @@ class ProgressLogger:
             f"{progress.next_batch} | reason={reason}"
         )
 
-    def validation(self, *, epoch: int, metrics: dict[str, float]) -> None:
-        summary_names = ("loss.total", "mpjpe_m", "root_local_drift_m", "contact_f1")
-        summary = " | ".join(
-            f"{name}={metrics[name]:.6f}" for name in summary_names if name in metrics
-        )
-        self._write(f"[validation] epoch={epoch} | {summary}")
+    def best_checkpoint(
+        self,
+        path: Path,
+        *,
+        epoch: int | None,
+        validation_loss: float | None,
+    ) -> None:
+        loss = "?" if validation_loss is None else f"{validation_loss:.6f}"
+        self._write(f"[checkpoint] best={path} | epoch={epoch} | val_loss={loss}")
+
+    def validation_start(self, *, epoch: int, epochs: int, windows: int) -> None:
+        self._write(f"[validation] START | epoch {epoch}/{epochs} | windows={windows:,}")
+
+    def validation(
+        self,
+        *,
+        epoch: int,
+        epochs: int,
+        metrics: dict[str, float],
+        elapsed_seconds: float,
+        improved: bool,
+        best_loss: float | None,
+        validations_without_improvement: int | None,
+        patience: int | None,
+    ) -> None:
+        parts = [
+            f"[validation] DONE | epoch {epoch}/{epochs}",
+            f"val_loss={metrics['loss.total']:.6f}",
+            f"MPJPE={metrics['mpjpe_m'] * 100:.2f}cm",
+            f"root_drift={metrics['root_local_drift_m'] * 100:.2f}cm",
+            f"contact_F1={metrics['contact_f1']:.4f}",
+            f"time={format_duration(elapsed_seconds)}",
+        ]
+        if best_loss is not None:
+            parts.append(f"best={best_loss:.6f}")
+        if improved:
+            parts.append("IMPROVED")
+        if validations_without_improvement is not None and patience is not None:
+            parts.append(f"early_stop={validations_without_improvement}/{patience}")
+        self._write(" | ".join(parts))
 
     def finish(self, *, status: str, reason: str | None, progress: TrainingProgress) -> None:
         suffix = f" | reason={reason}" if reason else ""

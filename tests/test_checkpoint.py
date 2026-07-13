@@ -11,6 +11,7 @@ from gravity_mocap.checkpoint import (
     cleanup_stale_checkpoint_temps,
     compatibility_hash,
     load_training_checkpoint,
+    promote_best_checkpoint,
     read_training_state,
     resolve_resume_path,
     save_training_checkpoint,
@@ -19,6 +20,8 @@ from gravity_mocap.fixture import create_fixture
 from gravity_mocap.schema import read_shard, write_shard
 from gravity_mocap.trainer import (
     _epoch_session_limit_reached,
+    _restore_legacy_validation_progress,
+    _update_early_stopping,
     _validate_session_limits,
     build_model,
     load_config,
@@ -47,6 +50,9 @@ def test_checkpoint_round_trip_restores_full_state_without_training(tmp_path: Pa
         last_loss=0.75,
         stop_reason="SIGINT",
         mlflow_run_id="test-run-id",
+        best_validation_loss=0.42,
+        best_validation_epoch=6,
+        validations_without_improvement=1,
     )
     random.seed(10)
     np.random.seed(11)
@@ -106,6 +112,43 @@ def test_checkpoint_rejects_changed_bom(tmp_path: Path) -> None:
         )
 
 
+def test_checkpoint_from_before_early_stopping_loads_default_state(tmp_path: Path) -> None:
+    config, model, optimizer, scaler = _state()
+    data_bom = {"schema_version": 1, "shard_count": 1, "shards": []}
+    checkpoint = save_training_checkpoint(
+        tmp_path,
+        model,
+        optimizer,
+        scaler,
+        config,
+        data_bom,
+        TrainingProgress(next_epoch=4, global_step=180),
+    )
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    for name in (
+        "best_validation_loss",
+        "best_validation_epoch",
+        "validations_without_improvement",
+    ):
+        payload["progress"].pop(name)
+    torch.save(payload, checkpoint)
+
+    loaded = load_training_checkpoint(
+        checkpoint,
+        model,
+        optimizer,
+        scaler,
+        config,
+        data_bom,
+        torch.device("cpu"),
+    )
+
+    assert loaded.next_epoch == 4
+    assert loaded.best_validation_loss is None
+    assert loaded.best_validation_epoch is None
+    assert loaded.validations_without_improvement == 0
+
+
 def test_epoch_limit_can_change_but_optimizer_settings_cannot() -> None:
     config, *_ = _state()
     extended = {**config, "train": {**config["train"], "epochs": 600}}
@@ -136,6 +179,17 @@ def test_epoch_limit_can_change_but_optimizer_settings_cannot() -> None:
         "validation": {**config["validation"], "every_epochs": 10},
     }
     assert compatibility_hash(changed_validation_schedule) == compatibility_hash(config)
+    changed_early_stopping = {
+        **config,
+        "validation": {
+            **config["validation"],
+            "early_stopping": {
+                **config["validation"]["early_stopping"],
+                "patience": 30,
+            },
+        },
+    }
+    assert compatibility_hash(changed_early_stopping) == compatibility_hash(config)
 
 
 def test_cleanup_removes_only_uncommitted_checkpoint_temps(tmp_path: Path) -> None:
@@ -147,12 +201,27 @@ def test_cleanup_removes_only_uncommitted_checkpoint_temps(tmp_path: Path) -> No
     state_temp.write_text("partial")
     archive_temp = tmp_path / "epoch-0005.pt.tmp"
     archive_temp.write_bytes(b"partial")
+    best_temp = tmp_path / "best.pt.tmp"
+    best_temp.write_bytes(b"partial")
 
     removed = cleanup_stale_checkpoint_temps(tmp_path)
 
-    assert set(removed) == {latest_temp, state_temp, archive_temp}
+    assert set(removed) == {latest_temp, best_temp, state_temp, archive_temp}
     assert latest.read_bytes() == b"valid"
     assert all(not path.exists() for path in removed)
+
+
+def test_best_checkpoint_is_promoted_atomically(tmp_path: Path) -> None:
+    latest = tmp_path / "latest.pt"
+    latest.write_bytes(b"best-model-state")
+    stale_best = tmp_path / "best.pt"
+    stale_best.write_bytes(b"stale")
+
+    best = promote_best_checkpoint(tmp_path)
+
+    assert best == stale_best
+    assert best.read_bytes() == b"best-model-state"
+    assert not (tmp_path / "best.pt.tmp").exists()
 
 
 def test_training_plan_never_constructs_an_optimizer(
@@ -176,6 +245,7 @@ def test_training_plan_never_constructs_an_optimizer(
     assert plan["action_on_execute"] == "start_new"
     assert plan["max_hours_this_session"] is None
     assert plan["max_epochs_this_session"] == 8
+    assert plan["validation"]["early_stopping"]["enabled"] is False
     assert plan["progress_logging"]["mlflow_enabled"] is True
     assert not (tmp_path / "run" / "mlflow" / "mlflow.db").exists()
 
@@ -197,6 +267,53 @@ def test_epoch_session_limit_counts_a_resumed_partial_epoch() -> None:
     assert _epoch_session_limit_reached(epoch=10, session_start_epoch=9, max_epochs=2)
     assert _epoch_session_limit_reached(epoch=9, session_start_epoch=9, max_epochs=1)
     assert not _epoch_session_limit_reached(epoch=100, session_start_epoch=9, max_epochs=None)
+
+
+def test_early_stopping_tracks_improvement_and_patience() -> None:
+    progress = TrainingProgress()
+
+    assert _update_early_stopping(progress, epoch=1, validation_loss=0.5, min_delta=0.001)
+    assert progress.best_validation_loss == 0.5
+    assert progress.best_validation_epoch == 1
+    assert progress.validations_without_improvement == 0
+
+    assert not _update_early_stopping(progress, epoch=2, validation_loss=0.4995, min_delta=0.001)
+    assert progress.best_validation_loss == 0.5
+    assert progress.validations_without_improvement == 1
+
+    assert _update_early_stopping(progress, epoch=3, validation_loss=0.48, min_delta=0.001)
+    assert progress.best_validation_loss == 0.48
+    assert progress.best_validation_epoch == 3
+    assert progress.validations_without_improvement == 0
+
+
+def test_early_stopping_rejects_non_finite_validation_loss() -> None:
+    with pytest.raises(RuntimeError, match="not finite"):
+        _update_early_stopping(
+            TrainingProgress(), epoch=1, validation_loss=float("nan"), min_delta=0.0
+        )
+
+
+def test_legacy_validation_state_seeds_resumable_early_stopping(tmp_path: Path) -> None:
+    (tmp_path / "validation-state.json").write_text('{"epoch": 3, "metrics": {"loss.total": 0.25}}')
+    progress = TrainingProgress(next_epoch=4)
+
+    restored = _restore_legacy_validation_progress(progress, tmp_path, monitor="loss.total")
+
+    assert restored is True
+    assert progress.best_validation_loss == 0.25
+    assert progress.best_validation_epoch == 3
+    assert progress.validations_without_improvement == 0
+
+
+def test_early_stopping_config_is_validated(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/train-paper.yaml")
+    config["validation"]["early_stopping"]["patience"] = 0
+    config_path = tmp_path / "invalid.yaml"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+    with pytest.raises(ValueError, match="patience must be at least 1"):
+        load_config(config_path)
 
 
 def test_training_plan_reports_sequence_disjoint_validation_split(tmp_path: Path) -> None:

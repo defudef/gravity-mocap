@@ -17,12 +17,14 @@ from torch.utils.data import DataLoader
 
 from .catalog import DatasetCatalog
 from .checkpoint import (
+    LATEST_CHECKPOINT,
     TrainingProgress,
     archive_latest_checkpoint,
     cleanup_stale_checkpoint_temps,
     compatibility_hash,
     data_bom_hash,
     load_training_checkpoint,
+    promote_best_checkpoint,
     read_training_state,
     resolve_resume_path,
     save_training_checkpoint,
@@ -106,6 +108,19 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("validation.batch_size must be at least 1")
     if bool(validation_config["enabled"]) and validation_fraction <= 0:
         raise ValueError("enabled validation requires data.validation_fraction > 0")
+    early_stopping = validation_config.setdefault("early_stopping", {})
+    early_stopping.setdefault("enabled", bool(validation_config["enabled"]))
+    early_stopping.setdefault("monitor", "loss.total")
+    early_stopping.setdefault("patience", 20)
+    early_stopping.setdefault("min_delta", 0.001)
+    if bool(early_stopping["enabled"]) and not bool(validation_config["enabled"]):
+        raise ValueError("early stopping requires validation.enabled: true")
+    if str(early_stopping["monitor"]) != "loss.total":
+        raise ValueError("validation.early_stopping.monitor must be loss.total")
+    if int(early_stopping["patience"]) < 1:
+        raise ValueError("validation.early_stopping.patience must be at least 1")
+    if float(early_stopping["min_delta"]) < 0:
+        raise ValueError("validation.early_stopping.min_delta cannot be negative")
     logging_config = config.setdefault("logging", {})
     logging_config.setdefault("log_every_steps", 1)
     mlflow_config = logging_config.setdefault("mlflow", {})
@@ -224,7 +239,12 @@ def training_plan(
                 resume_errors.append("saved checkpoint is incompatible with the current config")
             if state.get("data_bom_hash") != data_bom_hash(bill_of_materials):
                 resume_errors.append("saved checkpoint data BOM differs from current shards")
-            if int(state.get("next_epoch", 1)) > int(config["train"]["epochs"]):
+            early_stopped = (
+                bool(state.get("complete"))
+                and state.get("stop_reason") == "early_stopping"
+                and bool(config["validation"]["early_stopping"]["enabled"])
+            )
+            if early_stopped or int(state.get("next_epoch", 1)) > int(config["train"]["epochs"]):
                 action = "already_complete"
     ready = (
         not license_errors
@@ -300,6 +320,54 @@ def _epoch_session_limit_reached(
     *, epoch: int, session_start_epoch: int, max_epochs: int | None
 ) -> bool:
     return max_epochs is not None and epoch - session_start_epoch + 1 >= max_epochs
+
+
+def _update_early_stopping(
+    progress: TrainingProgress,
+    *,
+    epoch: int,
+    validation_loss: float,
+    min_delta: float,
+) -> bool:
+    if not math.isfinite(validation_loss):
+        raise RuntimeError("Early-stopping validation loss is not finite")
+    improved = (
+        progress.best_validation_loss is None
+        or validation_loss < progress.best_validation_loss - min_delta
+    )
+    if improved:
+        progress.best_validation_loss = validation_loss
+        progress.best_validation_epoch = epoch
+        progress.validations_without_improvement = 0
+    else:
+        progress.validations_without_improvement += 1
+    return improved
+
+
+def _restore_legacy_validation_progress(
+    progress: TrainingProgress,
+    output: Path,
+    *,
+    monitor: str,
+) -> bool:
+    """Seed early stopping from the last pre-feature validation checkpoint."""
+    if progress.best_validation_loss is not None:
+        return False
+    path = output / "validation-state.json"
+    if not path.is_file():
+        return False
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        epoch = int(state["epoch"])
+        value = float(state["metrics"][monitor])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+        return False
+    if epoch != progress.next_epoch - 1 or not math.isfinite(value):
+        return False
+    progress.best_validation_loss = value
+    progress.best_validation_epoch = epoch
+    progress.validations_without_improvement = 0
+    return True
 
 
 def _device(value: str) -> torch.device:
@@ -465,6 +533,17 @@ def run_training(
         resumed_from = str(resume_path)
 
     epochs = int(config["train"]["epochs"])
+    early_stopping = config["validation"]["early_stopping"]
+    if (
+        progress.complete
+        and progress.stop_reason == "early_stopping"
+        and bool(early_stopping["enabled"])
+    ):
+        return {
+            **asdict(progress),
+            "status": "already_complete",
+            "resumed_from": resumed_from,
+        }
     if progress.next_epoch > epochs:
         if not progress.complete:
             progress.complete = True
@@ -483,6 +562,13 @@ def run_training(
             "status": "already_complete",
             "resumed_from": resumed_from,
         }
+    restored_legacy_best = False
+    if resume_path is not None and bool(early_stopping["enabled"]):
+        restored_legacy_best = _restore_legacy_validation_progress(
+            progress,
+            output,
+            monitor=str(early_stopping["monitor"]),
+        )
     progress.complete = False
     progress.stop_reason = None
 
@@ -521,6 +607,17 @@ def run_training(
         resumed_from=resumed_from,
         device=device,
     )
+    if (
+        restored_legacy_best
+        and resume_path is not None
+        and resume_path.resolve() == (output / LATEST_CHECKPOINT).resolve()
+    ):
+        best_path = promote_best_checkpoint(output)
+        logger.best_checkpoint(
+            best_path,
+            epoch=progress.best_validation_epoch,
+            validation_loss=progress.best_validation_loss,
+        )
 
     def save_progress(
         *,
@@ -541,6 +638,9 @@ def run_training(
             complete=complete,
             stop_reason=stop_reason,
             mlflow_run_id=progress.mlflow_run_id,
+            best_validation_loss=progress.best_validation_loss,
+            best_validation_epoch=progress.best_validation_epoch,
+            validations_without_improvement=progress.validations_without_improvement,
         )
         checkpoint_path = save_training_checkpoint(
             output,
@@ -564,6 +664,7 @@ def run_training(
             for epoch in range(progress.next_epoch, epochs + 1):
                 epoch_metric_sums: dict[str, float] = {}
                 epoch_metric_steps = 0
+                validation_improved = False
                 dataset.set_epoch(epoch)
                 all_batches = _epoch_batches(len(dataset), batch_size, seed, epoch)
                 start_batch = progress.next_batch if epoch == progress.next_epoch else 0
@@ -683,6 +784,12 @@ def run_training(
                     bool(config["validation"]["enabled"])
                     and epoch % int(config["validation"]["every_epochs"]) == 0
                 ):
+                    logger.validation_start(
+                        epoch=epoch,
+                        epochs=epochs,
+                        windows=len(validation_dataset),
+                    )
+                    validation_started = time.monotonic()
                     validation_metrics = evaluate_model(
                         training_model,
                         validation_dataset,
@@ -690,10 +797,53 @@ def run_training(
                         device,
                         use_amp=use_amp,
                     )
-                    logger.validation(epoch=epoch, metrics=validation_metrics)
+                    if bool(early_stopping["enabled"]):
+                        monitor = str(early_stopping["monitor"])
+                        validation_improved = _update_early_stopping(
+                            progress,
+                            epoch=epoch,
+                            validation_loss=float(validation_metrics[monitor]),
+                            min_delta=float(early_stopping["min_delta"]),
+                        )
+                        if (
+                            progress.validations_without_improvement
+                            >= int(early_stopping["patience"])
+                            and epoch < epochs
+                            and stop.reason is None
+                        ):
+                            stop.reason = "early_stopping"
+                    validation_elapsed = time.monotonic() - validation_started
+                    logger.validation(
+                        epoch=epoch,
+                        epochs=epochs,
+                        metrics=validation_metrics,
+                        elapsed_seconds=validation_elapsed,
+                        improved=validation_improved,
+                        best_loss=progress.best_validation_loss,
+                        validations_without_improvement=(
+                            progress.validations_without_improvement
+                            if bool(early_stopping["enabled"])
+                            else None
+                        ),
+                        patience=(
+                            int(early_stopping["patience"])
+                            if bool(early_stopping["enabled"])
+                            else None
+                        ),
+                    )
+                    tracking_metrics = dict(validation_metrics)
+                    if bool(early_stopping["enabled"]):
+                        tracking_metrics.update(
+                            {
+                                "early_stopping.best_loss": float(progress.best_validation_loss),
+                                "early_stopping.without_improvement": float(
+                                    progress.validations_without_improvement
+                                ),
+                            }
+                        )
                     tracker.log_validation(
                         epoch=epoch,
-                        metrics=validation_metrics,
+                        metrics=tracking_metrics,
                         global_step=progress.global_step,
                     )
                     _write_json(
@@ -704,9 +854,19 @@ def run_training(
                             "sequences": validation_dataset.sequence_count,
                             "windows": len(validation_dataset),
                             "metrics": validation_metrics,
+                            "elapsed_seconds": validation_elapsed,
+                            "early_stopping": {
+                                "enabled": bool(early_stopping["enabled"]),
+                                "monitor": early_stopping["monitor"],
+                                "best_loss": progress.best_validation_loss,
+                                "best_epoch": progress.best_validation_epoch,
+                                "without_improvement": (progress.validations_without_improvement),
+                                "patience": early_stopping["patience"],
+                                "min_delta": early_stopping["min_delta"],
+                            },
                         },
                     )
-                if epoch < epochs:
+                if epoch < epochs and stop.reason is None:
                     if _epoch_session_limit_reached(
                         epoch=epoch,
                         session_start_epoch=session_start_epoch,
@@ -715,14 +875,22 @@ def run_training(
                         stop.reason = "max_epochs"
                     elif deadline is not None and time.monotonic() >= deadline:
                         stop.reason = "max_hours"
+                early_stopped = stop.reason == "early_stopping"
                 progress = save_progress(
                     next_epoch=epoch + 1,
                     next_batch=0,
                     last_loss=last_loss,
-                    complete=epoch == epochs,
+                    complete=epoch == epochs or early_stopped,
                     stop_reason=("completed" if epoch == epochs else stop.reason),
                     reason=("completed" if epoch == epochs else stop.reason or "epoch"),
                 )
+                if validation_improved:
+                    best_path = promote_best_checkpoint(output)
+                    logger.best_checkpoint(
+                        best_path,
+                        epoch=progress.best_validation_epoch,
+                        validation_loss=progress.best_validation_loss,
+                    )
                 if epoch % int(config["train"]["checkpoint_every"]) == 0:
                     archive_latest_checkpoint(
                         output,
@@ -730,6 +898,18 @@ def run_training(
                         keep=int(config["train"]["keep_last_checkpoints"]),
                     )
                 next_epoch, next_batch = epoch + 1, 0
+                if early_stopped:
+                    tracker.finish(status="FINISHED", reason="early_stopping")
+                    logger.finish(
+                        status="early stopped",
+                        reason="early_stopping",
+                        progress=progress,
+                    )
+                    return {
+                        **asdict(progress),
+                        "status": "early_stopped",
+                        "resumed_from": resumed_from,
+                    }
                 if stop.reason is not None and epoch < epochs:
                     tracker.finish(status="KILLED", reason=stop.reason)
                     logger.finish(status="stopped safely", reason=stop.reason, progress=progress)
