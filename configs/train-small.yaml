@@ -1,0 +1,72 @@
+seed: 1337
+data:
+  catalog: datasets.yaml
+  root: ../Saved/GravityMocap/processed
+  allow_synthetic: false
+  target_fps: 30
+  validation_fraction: 0.05
+  split_seed: 7331
+  sequence_length: 120
+  stride: 60
+  num_workers: 4
+  augmentation:
+    enabled: true
+    keypoint_noise_std: 0.015
+    confidence_min: 0.5
+    keypoint_dropout_probability: 0.05
+    frame_dropout_probability: 0.01
+    occlusion_probability: 0.5
+    occlusion_min_frames: 4
+    occlusion_max_frames: 30
+    occlusion_joint_fraction: 0.3
+    bbox_jitter_std: 0.02
+    camera_dropout_probability: 0.25
+model:
+  joints: 22
+  image_feature_dim: 512
+  hidden_dim: 384
+  layers: 6
+  heads: 8
+  mlp_ratio: 4
+  dropout: 0.1
+  attention_radius: 120
+train:
+  batch_size: 16
+  gradient_accumulation_steps: 16
+  effective_batch_size: 256
+  mixed_precision: true
+  epochs: 500
+  learning_rate: 0.0002
+  weight_decay: 0.01
+  grad_clip: 1.0
+  device: auto
+  checkpoint_every: 5
+  checkpoint_every_minutes: 15
+  keep_last_checkpoints: 3
+validation:
+  enabled: true
+  every_epochs: 1
+  batch_size: 32
+  early_stopping:
+    enabled: true
+    monitor: loss.total
+    patience: 20
+    min_delta: 0.001
+logging:
+  log_every_steps: 1
+  mlflow:
+    enabled: true
+    tracking_uri: auto
+    experiment_name: gravity-mocap
+    run_name: motion-small
+    log_checkpoints: false
+loss:
+  rotations: 1.0
+  root_velocity: 1.0
+  orientation: 1.0
+  camera_orientation: 1.0
+  weak_camera: 1.0
+  contacts: 0.1
+  joints_3d: 1.0
+  reprojection_2d: 0.1
+  smoothness: 0.05

@@ -167,6 +167,23 @@ automation—starts the paper-size motion training:
 ./scripts/train.sh --execute
 ```
 
+For the recommended smaller capacity baseline, use the dedicated wrapper. It
+selects `configs/train-small.yaml` and the isolated
+`Saved/GravityMocap/runs/motion-small/` output while preserving the production
+data, seed, split, augmentation, optimizer, validation, and early-stopping
+settings. Only model capacity changes from 12x512 (39.3M parameters) to 6x384
+(11.5M parameters):
+
+```sh
+./scripts/train-small.sh --max-epochs 3 --resume never
+./scripts/train-small.sh --execute --max-epochs 3 --resume never
+```
+
+Subsequent sessions resume with
+`./scripts/train-small.sh --execute --max-epochs N`. Never point the small
+configuration at the paper model's output because their checkpoints are
+intentionally incompatible.
+
 For repeatable overnight sessions:
 
 ```sh

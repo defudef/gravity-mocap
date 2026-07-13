@@ -288,6 +288,31 @@ and may also replace `keypoints_2d` and `bbox`.
 
 ## Start motion training yourself
 
+### Smaller 11.5M-parameter baseline
+
+The recommended capacity experiment keeps the paper config's dataset, seed,
+split, augmentations, optimizer, validation, and early stopping unchanged. It
+changes only the Transformer from 12x512 (39.3M parameters) to 6x384 (11.5M)
+and writes to an isolated `Saved/GravityMocap/runs/motion-small/` output.
+
+Preview and then start its first three-epoch session:
+
+```sh
+./scripts/train-small.sh --max-epochs 3 --resume never
+./scripts/train-small.sh --execute --max-epochs 3 --resume never
+```
+
+Resume the same small-model run later without `--resume never`:
+
+```sh
+./scripts/train-small.sh --execute --max-epochs 10
+```
+
+The small and paper checkpoints are architecturally incompatible by design;
+their separate output directories prevent accidental cross-resume.
+
+### Paper-size model
+
 Inspect the full paper-size job:
 
 ```sh

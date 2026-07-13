@@ -7,9 +7,24 @@ from gravity_mocap.fixture import create_fixture
 from gravity_mocap.losses import compute_losses
 from gravity_mocap.metrics import compute_motion_metrics
 from gravity_mocap.model import GravityViewMotionModel
-from gravity_mocap.trainer import evaluate_model, load_config
+from gravity_mocap.trainer import build_model, evaluate_model, load_config
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_small_config_changes_only_model_capacity() -> None:
+    paper = load_config(ROOT / "configs/train-paper.yaml")
+    small = load_config(ROOT / "configs/train-small.yaml")
+
+    assert small["seed"] == paper["seed"]
+    for section in ("data", "train", "validation", "loss"):
+        assert small[section] == paper[section]
+    assert small["model"] == {
+        **paper["model"],
+        "hidden_dim": 384,
+        "layers": 6,
+    }
+    assert build_model(small).parameter_count == 11_526_300
 
 
 def test_forward_and_losses_are_finite_without_training(tmp_path: Path) -> None:
