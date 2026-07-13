@@ -370,3 +370,28 @@ def test_remote_zip_members_replace_partial_outputs_atomically(tmp_path: Path) -
         assert (destination / name).read_bytes() == payload
         assert not (destination / f"{name}.part").exists()
     assert not (destination / "data/too-large.b3d").exists()
+
+
+def test_remote_zip_core_selection_is_group_stratified() -> None:
+    members = [
+        SimpleNamespace(filename="train/A/a-small.b3d", file_size=10),
+        SimpleNamespace(filename="train/A/a-large.b3d", file_size=20),
+        SimpleNamespace(filename="train/B/b-small.b3d", file_size=11),
+        SimpleNamespace(filename="train/B/b-large.b3d", file_size=21),
+        SimpleNamespace(filename="train/C/c-small.b3d", file_size=12),
+    ]
+    selected = download._select_remote_zip_members(
+        members,
+        {
+            "selection_group_regex": r"^train/([^/]+)/",
+            "max_core_members": 4,
+            "max_core_bytes": 60,
+        },
+    )
+
+    assert [item.filename for item in selected] == [
+        "train/A/a-small.b3d",
+        "train/B/b-small.b3d",
+        "train/C/c-small.b3d",
+        "train/A/a-large.b3d",
+    ]

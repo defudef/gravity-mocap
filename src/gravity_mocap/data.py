@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
@@ -273,12 +274,27 @@ def audit_training_data(
                 errors.append(
                     f"{path}: shard data-use acceptance flag does not match the approved catalog"
                 )
+            if member_regex := entry.downloader.get("member_regex"):
+                source_file = str(
+                    provenance.get("source_file") or provenance.get("source_sequence", "")
+                )
+                if not re.search(str(member_regex), source_file):
+                    errors.append(
+                        f"{path}: source file {source_file!r} is outside the configured "
+                        f"{source_id} training partition"
+                    )
         bill_of_materials["shards"].append(
             {
                 "path": str(path.relative_to(root)),
                 "source_id": source_id,
                 "source_title": provenance.get("source_title"),
                 "source_sequence": provenance.get("source_sequence"),
+                "source_file": provenance.get("source_file"),
+                "source_study": provenance.get("source_study"),
+                "source_href": provenance.get("source_href"),
+                "source_trial_index": provenance.get("source_trial_index"),
+                "source_trial_name": provenance.get("source_trial_name"),
+                "split_group": provenance.get("split_group"),
                 "license_id": license_id,
                 "license_url": provenance.get("license_url"),
                 "attribution_required": bool(provenance.get("attribution_required", False)),

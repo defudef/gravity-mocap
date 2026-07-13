@@ -1,15 +1,28 @@
 schema_version: 1
 
+preprocessing:
+  synthetic_camera:
+    yaw_degrees: [-180.0, 180.0]
+    pitch_degrees: [-20.0, 15.0]
+    roll_degrees: [-8.0, 8.0]
+    distance_meters: [3.0, 7.0]
+    horizontal_offset_meters: [-0.35, 0.35]
+    vertical_offset_meters: [-0.2, 0.2]
+    yaw_drift_std_degrees: 0.3
+    pitch_drift_std_degrees: 0.1
+    roll_drift_std_degrees: 0.05
+    translation_drift_std_meters: 0.001
+
 profiles:
   smoke:
     datasets: [cmu_mocap, addbiomechanics]
     note: Tiny, selective downloads for validating the data path.
   core:
-    datasets: [cmu_mocap, addbiomechanics, sam, mri]
-    note: Practical first corpus; three motion sources plus public paired mRI video.
+    datasets: [cmu_mocap, addbiomechanics, 100style]
+    note: Commercial-clean motion corpus with study-stratified biomechanics and styled BVH.
   expanded:
-    datasets: [cmu_mocap, addbiomechanics, sam, mri, hum4d, tum_preha]
-    note: Adds HUM4D paired video and TUM motion with explicit data-use acceptance.
+    datasets: [cmu_mocap, addbiomechanics, 100style, tum_preha]
+    note: Adds the commercial-use TUM pose prior with explicit data-use acceptance.
 
 datasets:
   cmu_mocap:
@@ -38,17 +51,33 @@ datasets:
       type: remote_zip_members
       url: http://archive.simtk.org/addbiomechanics/addbiomechanics.zip
       archive_bytes: 417665422113
-      member_regex: '^test/With_Arm/.+\.b3d$'
+      member_regex: '^train/With_Arm/.+\.b3d$'
       smoke_members:
-        - test/With_Arm/Hammer2013_Formatted_With_Arm/subject10/subject10.b3d
-      max_core_members: 12
+        - train/With_Arm/Tiziana2019_Formatted_With_Arm/Subject40/Subject40.b3d
+      selection_group_regex: '^train/With_Arm/([^/]+)/'
+      max_core_members: 24
+      max_core_bytes: 12884901888
+
+  100style:
+    title: 100STYLE Dataset
+    task: motion
+    license_id: CC-BY-4.0
+    license_url: https://www.ianxmason.com/100style/
+    approved_for_training: true
+    attribution_required: true
+    downloader:
+      type: http
+      url: https://zenodo.org/api/records/8127870/files/100STYLE.zip/content
+      filename: 100STYLE.zip
+      expected_bytes: 1468515354
+      md5: 3cf627852fd8192024c04a8d0ef49583
 
   sam:
     title: SAM Spatial Audio-driven Human Motion Dataset
     task: motion
     license_id: CC-BY-4.0
     license_url: https://huggingface.co/datasets/JimSYXu/SAM
-    approved_for_training: true
+    approved_for_training: false
     attribution_required: true
     downloader:
       type: huggingface
@@ -61,7 +90,7 @@ datasets:
     task: paired_video
     license_id: CC0-1.0
     license_url: https://doi.org/10.5061/dryad.9ghx3ffpp
-    approved_for_training: true
+    approved_for_training: false
     attribution_required: false
     downloader:
       type: dryad_browser
@@ -81,7 +110,7 @@ datasets:
     task: paired_video
     license_id: CC-BY-4.0
     license_url: https://parkyeeun23.github.io/HUM4D/
-    approved_for_training: true
+    approved_for_training: false
     attribution_required: true
     downloader:
       type: gdrive_folder
@@ -103,6 +132,12 @@ datasets:
       md5: 019f878336815a61ba59a5b6c6de39a1
 
 blocked_sources:
+  - id: sam
+    reason: Raw motion scope and participant clearance need confirmation; audio and SMPL-X derivatives are excluded.
+  - id: mri
+    reason: Dryad CC0 metadata conflicts with the original publication's CC BY-NC 4.0 statement.
+  - id: hum4d
+    reason: Public processing depends on non-commercial SMPL/SMPL-X assets and raw Vicon scope is unclear.
   - id: amass
     reason: Aggregated source with per-component terms; excluded from the clean allowlist.
   - id: bedlam

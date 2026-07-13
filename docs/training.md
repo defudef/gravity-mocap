@@ -65,8 +65,8 @@ non-finite value.
 | Profile | Sources | Intended use |
 | --- | --- | --- |
 | `smoke` | CMU, one remote AddBiomechanics B3D | exercise download/conversion without the 389 GiB archive |
-| `core` | CMU, selected AddBiomechanics, SAM, mRI | motion corpus plus mRI paired video; SAM is motion/audio only |
-| `expanded` | core + HUM4D + TUM prehab | HUM4D adds paired video; TUM adds radar/3D pose and requires DUA acceptance |
+| `core` | CMU, 24 study-stratified AddBiomechanics train B3Ds, 100STYLE | commercially usable motion-only corpus |
+| `expanded` | core + TUM prehab | adds radar/3D pose and requires DUA acceptance |
 
 AMASS, BEDLAM, Human3.6M, 3DPW, HumanML3D, and the GVHMR repo are explicitly
 blocked. Dataset binaries stay in `Saved/GravityMocap` and are ignored by Git.
@@ -76,8 +76,8 @@ embeds it in checkpoints.
 
 ## Operator flow
 
-For a path-independent fresh run using the currently supported CMU and
-AddBiomechanics converters, preview and then execute the repository workflow:
+For a path-independent fresh run using CMU, AddBiomechanics, and 100STYLE,
+preview and then execute the repository workflow:
 
 ```sh
 ./scripts/start-fresh-training.sh
@@ -86,7 +86,7 @@ AddBiomechanics converters, preview and then execute the repository workflow:
 ```
 
 Execution synchronizes the environment, validates the allowlist/model,
-downloads and preprocesses both sources, verifies that each produced shards,
+downloads and preprocesses all three sources, verifies that each produced shards,
 dry-runs a new output, archives the previous default run, and starts training.
 Any failure before the archive step leaves the previous run in place. This
 command intentionally starts fresh; subsequent sessions resume with
@@ -108,10 +108,18 @@ Plan data acquisition:
 ./scripts/mocap.sh download --profile core
 ```
 
-For AddBiomechanics, `core` deterministically selects the 12 smallest matching
-B3D members rather than archive order (currently about 0.81 GiB instead of more
-than 9 GiB). Each member is written atomically through `.part`, reports
-progress, and must match the ZIP directory's size and CRC before use.
+For AddBiomechanics, `core` considers only `train/With_Arm`, then selects up to
+24 B3D members in deterministic round-robin order across the eight studies and
+under a 12 GiB uncompressed budget. The current archive resolves to 24 members
+and 10.65 GiB. Each member is written atomically through `.part`, reports
+progress, and must match the ZIP directory's size and CRC before use. Every B3D
+trial becomes a separate shard, but all trials from the same B3D share one split
+group and cannot cross the train/validation boundary.
+
+100STYLE is downloaded from its checksum-pinned Zenodo record, extracted
+atomically, parsed directly from BVH, trimmed with the published
+`Frame_Cuts.csv`, and resampled from 60 to 30 FPS. Its 100 style directories are
+the holdout groups.
 
 Preprocessing logs progress every ten sequences and is safely repeatable.
 Existing atomic shards are reused only when their schema, provenance hash,
@@ -127,38 +135,12 @@ and only when its hostname/path match HTTPS and the full archive SHA-256 is
 pinned. The completed archive must pass both size and SHA-256 verification; the
 implementation never uses `verify=False`.
 
-The mRI release is public and requires no account. Dryad places a JavaScript
-browser challenge in front of the file stream, so the downloader launches a
-temporary headed Chrome session through pinned Apache-2.0 `@playwright/cli`.
-Chrome passes the challenge and yields a signed Dryad S3 URL; its own download
-is cancelled, and the existing HTTP path performs the actual resumable transfer
-into `Saved/GravityMocap/raw/mri/*.part`. The browser session is temporary and
-stores no project credential. Node.js 18+ and `npx` must be on `PATH` for this
-step. Published sizes and SHA-256 values remain pinned and checked. Do not use
-the pretrained `.pkl` models included in the release. Run:
-
-```sh
-./scripts/mocap.sh download --profile core --allow-large --execute
-./scripts/mocap.sh preprocess --profile core
-```
-
-For mRI alone:
-
-```sh
-./scripts/mocap.sh download --dataset mri
-./scripts/mocap.sh download --dataset mri --allow-large --execute
-```
-
-The first command remains side-effect-free and does not launch Chrome. The
-second opens and closes Chrome automatically. Repeating it after an interrupted
-connection obtains a new signed URL and resumes the `.part` file with an HTTP
-Range request before final checksum verification. A corrupt completed or
-partial file is discarded automatically. If a resumed file fails verification,
-the downloader retries once from byte zero before reporting an error.
-
-Normalize paired-video annotations into the documented visual JSONL contract,
-train the visual encoder, extract features, and attach one feature file to the
-matching motion shard. These training commands also remain dry by default.
+mRI, SAM, and HUM4D remain catalogued for audit history but are not approved for
+official checkpoint training. mRI's Dryad CC0 metadata conflicts with the
+original publication's CC BY-NC statement; SAM's raw participant clearance
+needs confirmation; HUM4D's public processing depends on prohibited
+SMPL/SMPL-X assets and the raw Vicon scope is unclear. Explicit download or
+preprocess requests for those IDs fail closed. Existing raw files are ignored.
 
 When the shard inventory and license audit are both correct, the operator—not
 automation—starts the paper-size motion training:
@@ -167,7 +149,8 @@ automation—starts the paper-size motion training:
 ./scripts/train.sh --execute
 ```
 
-For the recommended smaller capacity baseline, use the dedicated wrapper. It
+For the current approximately 31--32 hour `core` corpus, the recommended model
+is the smaller capacity baseline. Use the dedicated wrapper. It
 selects `configs/train-small.yaml` and the isolated
 `Saved/GravityMocap/runs/motion-small/` output while preserving the production
 data, seed, split, augmentation, optimizer, validation, and early-stopping
@@ -183,6 +166,11 @@ Subsequent sessions resume with
 `./scripts/train-small.sh --execute --max-epochs N`. Never point the small
 configuration at the paper model's output because their checkpoints are
 intentionally incompatible.
+
+The capacity calculation is in `docs/model-capacity.md`. In short, current
+`core` yields roughly 53--54 thousand 4-second training windows after the 5%
+holdout. That supports the 6x384, 11.5M-parameter model; the 12x512, 39.3M model
+is retained as an explicit scaling experiment, not the default recommendation.
 
 For repeatable overnight sessions:
 

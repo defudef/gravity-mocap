@@ -391,6 +391,51 @@ def _verified_zip_member(path: Path, expected_bytes: int, expected_crc: int) -> 
     return checksum & 0xFFFFFFFF == expected_crc
 
 
+def _select_remote_zip_members(member_infos: list[object], spec: dict) -> list[object]:
+    maximum = int(spec.get("max_core_members", len(member_infos)))
+    group_regex = spec.get("selection_group_regex")
+    if not group_regex:
+        return sorted(
+            member_infos,
+            key=lambda item: (item.file_size, item.filename),
+        )[:maximum]
+    pattern = re.compile(str(group_regex))
+    groups: dict[str, list[object]] = {}
+    for item in member_infos:
+        match = pattern.search(item.filename)
+        if match is None:
+            raise ValueError(
+                f"Remote ZIP member does not match selection_group_regex: {item.filename}"
+            )
+        group = match.group(1) if match.groups() else match.group(0)
+        groups.setdefault(group, []).append(item)
+    for items in groups.values():
+        items.sort(key=lambda item: (item.file_size, item.filename))
+    budget = int(spec.get("max_core_bytes", 0))
+    selected: list[object] = []
+    selected_bytes = 0
+    positions = {group: 0 for group in groups}
+    while len(selected) < maximum:
+        progressed = False
+        for group in sorted(groups):
+            position = positions[group]
+            items = groups[group]
+            if position >= len(items):
+                continue
+            candidate = items[position]
+            positions[group] += 1
+            if budget and selected_bytes + candidate.file_size > budget:
+                continue
+            selected.append(candidate)
+            selected_bytes += candidate.file_size
+            progressed = True
+            if len(selected) >= maximum:
+                break
+        if not progressed:
+            break
+    return selected
+
+
 def _download_remote_zip(spec: dict, destination: Path, profile: str) -> list[Path]:
     from remotezip import RemoteZip
 
@@ -399,15 +444,12 @@ def _download_remote_zip(spec: dict, destination: Path, profile: str) -> list[Pa
             member_infos = [archive.getinfo(name) for name in spec["smoke_members"]]
         else:
             pattern = re.compile(spec["member_regex"])
-            member_infos = sorted(
-                (
-                    item
-                    for item in archive.infolist()
-                    if item.file_size and pattern.search(item.filename)
-                ),
-                key=lambda item: (item.file_size, item.filename),
-            )
-            member_infos = member_infos[: int(spec.get("max_core_members", len(member_infos)))]
+            matching = [
+                item
+                for item in archive.infolist()
+                if item.file_size and pattern.search(item.filename)
+            ]
+            member_infos = _select_remote_zip_members(matching, spec)
         if not member_infos:
             raise RuntimeError("No remote ZIP members matched the configured selection")
         if any(
@@ -480,8 +522,18 @@ def describe(entry: DatasetEntry, profile: str) -> str:
             else spec.get("max_core_members", "all")
         )
         archive_gib = spec["archive_bytes"] / 1024**3
-        qualifier = "configured" if profile == "smoke" else "smallest matching"
-        return f"select {selection} {qualifier} member(s) remotely from a {archive_gib:.1f} GiB ZIP"
+        qualifier = (
+            "configured"
+            if profile == "smoke"
+            else "study-stratified" if spec.get("selection_group_regex") else "smallest matching"
+        )
+        budget = ""
+        if profile != "smoke" and spec.get("max_core_bytes"):
+            budget = f" under {int(spec['max_core_bytes']) / 1024**3:.1f} GiB"
+        return (
+            f"select up to {selection} {qualifier} member(s){budget} remotely from a "
+            f"{archive_gib:.1f} GiB ZIP"
+        )
     if kind == "dryad_browser":
         files = spec.get("files", [spec])
         expected_gib = sum(int(file.get("expected_bytes", 0)) for file in files) / 1024**3

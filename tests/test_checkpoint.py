@@ -346,3 +346,36 @@ def test_training_plan_reports_sequence_disjoint_validation_split(tmp_path: Path
     assert plan["data_split"]["train_windows"] > 0
     assert plan["data_split"]["validation_windows"] > 0
     assert plan["data_split"]["target_fps"] == 30
+
+
+def test_training_plan_keeps_trials_from_one_source_file_in_one_split(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/train-smoke.yaml")
+    data_root = tmp_path / "fixtures"
+    paths = [
+        create_fixture(
+            data_root / "synthetic" / f"trial-{index}.npz",
+            frames=16,
+            image_feature_dim=32,
+        )
+        for index in range(4)
+    ]
+    for index, path in enumerate(paths):
+        arrays, provenance = read_shard(path)
+        provenance["source_sequence"] = f"subject-a/trial-{index}"
+        provenance["split_group"] = "subject-a"
+        write_shard(path, arrays, provenance)
+    config["data"].update(
+        {
+            "root": str(data_root),
+            "catalog": str(ROOT / "configs/datasets.yaml"),
+            "validation_fraction": 0.5,
+        }
+    )
+    config["validation"]["enabled"] = True
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+    plan = training_plan(config_path, tmp_path / "run")
+
+    assert plan["ready"] is False
+    assert "cannot produce a holdout split" in plan["data_split"]["errors"][0]

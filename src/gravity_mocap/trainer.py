@@ -163,7 +163,9 @@ def _split_paths(
         path = root / shard["path"]
         source_id = str(shard.get("source_id"))
         sequence = Path(str(shard.get("source_sequence") or shard["path"]))
-        if source_id == "cmu_mocap" and "subjects" in sequence.parts:
+        if shard.get("split_group"):
+            unit = str(shard["split_group"])
+        elif source_id == "cmu_mocap" and "subjects" in sequence.parts:
             subject_index = sequence.parts.index("subjects") + 1
             unit = "/".join(sequence.parts[: subject_index + 1])
         elif source_id == "addbiomechanics":

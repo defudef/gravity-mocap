@@ -1,18 +1,24 @@
 from __future__ import annotations
 
+import csv
 import hashlib
 import json
+import os
+import re
+import shutil
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 from .adapters import (
+    B3DReader,
     canonicalize_addbiomechanics,
     canonicalize_positions,
     find_cmu_sequences,
     load_asf_amc,
-    load_b3d,
+    load_bvh,
     load_generic_npz,
 )
 from .catalog import DatasetEntry
@@ -20,7 +26,132 @@ from .schema import REQUIRED_ARRAYS, SCHEMA_VERSION, stable_hash, write_shard
 from .skeleton import CONTACT_JOINTS, JOINT_NAMES, PARENTS, REST_OFFSETS
 
 CONVERTER_VERSION = "cleanroom-v2"
+B3D_BVH_CONVERTER_VERSION = "cleanroom-v3-b3d-trials-bvh"
 DEFAULT_TARGET_FPS = 30.0
+DEFAULT_CAMERA_SIMULATION: dict[str, object] = {
+    "yaw_degrees": [-180.0, 180.0],
+    "pitch_degrees": [-20.0, 15.0],
+    "roll_degrees": [-8.0, 8.0],
+    "distance_meters": [3.0, 7.0],
+    "horizontal_offset_meters": [-0.35, 0.35],
+    "vertical_offset_meters": [-0.2, 0.2],
+    "yaw_drift_std_degrees": 0.3,
+    "pitch_drift_std_degrees": 0.1,
+    "roll_drift_std_degrees": 0.05,
+    "translation_drift_std_meters": 0.001,
+}
+
+
+@dataclass(frozen=True)
+class RawSource:
+    primary: Path
+    source_paths: tuple[Path, ...]
+
+
+def _safe_extract_zip(archive_path: Path, extraction_root: Path) -> None:
+    marker = extraction_root / ".gravity-mocap-extracted.json"
+    expected_marker = {
+        "archive": archive_path.name,
+        "archive_bytes": archive_path.stat().st_size,
+        "archive_mtime_ns": archive_path.stat().st_mtime_ns,
+    }
+    if marker.exists():
+        try:
+            if json.loads(marker.read_text()) == expected_marker:
+                return
+        except (OSError, json.JSONDecodeError):
+            pass
+    temporary = extraction_root.with_name(f".{extraction_root.name}.extracting")
+    if temporary.exists():
+        shutil.rmtree(temporary)
+    if extraction_root.exists():
+        shutil.rmtree(extraction_root)
+    temporary.mkdir(parents=True)
+    try:
+        with zipfile.ZipFile(archive_path) as archive:
+            members = [
+                member
+                for member in archive.infolist()
+                if not member.filename.startswith("__MACOSX/")
+                and Path(member.filename).name != ".DS_Store"
+            ]
+            if any(
+                Path(member.filename).is_absolute() or ".." in Path(member.filename).parts
+                for member in members
+            ):
+                raise RuntimeError(f"Unsafe member path in {archive_path}")
+            file_members = [member for member in members if not member.is_dir()]
+            for index, member in enumerate(file_members, start=1):
+                output = temporary / member.filename
+                output.parent.mkdir(parents=True, exist_ok=True)
+                with archive.open(member) as source, output.open("wb") as target:
+                    shutil.copyfileobj(source, target, length=8 * 1024 * 1024)
+                if index == 1 or index % 100 == 0 or index == len(file_members):
+                    print(
+                        f"[preprocess] extracting {archive_path.name}: "
+                        f"{index}/{len(file_members)}",
+                        flush=True,
+                    )
+        (temporary / marker.name).write_text(json.dumps(expected_marker, sort_keys=True))
+        os.replace(temporary, extraction_root)
+    except BaseException:
+        shutil.rmtree(temporary, ignore_errors=True)
+        raise
+
+
+def _ensure_extracted(entry: DatasetEntry, dataset_root: Path) -> None:
+    expected_suffix = ".asf" if entry.dataset_id == "cmu_mocap" else ".bvh"
+    if entry.dataset_id not in {"cmu_mocap", "100style"}:
+        return
+    if any(dataset_root.rglob(f"*{expected_suffix}")):
+        return
+    for archive_path in sorted(dataset_root.glob("*.zip")):
+        _safe_extract_zip(archive_path, dataset_root / archive_path.stem)
+
+
+def _load_100style_cuts(dataset_root: Path) -> dict[tuple[str, str], tuple[int, int]]:
+    matches = list(dataset_root.rglob("Frame_Cuts.csv"))
+    if len(matches) != 1:
+        raise ValueError(
+            f"100STYLE needs exactly one Frame_Cuts.csv below {dataset_root}, found {len(matches)}"
+        )
+    cuts: dict[tuple[str, str], tuple[int, int]] = {}
+    with matches[0].open(encoding="utf-8-sig", newline="") as handle:
+        for row in csv.DictReader(handle):
+            style = str(row["STYLE_NAME"])
+            for key, start_value in row.items():
+                if not key.endswith("_START") or start_value in {None, "", "N/A"}:
+                    continue
+                motion = key.removesuffix("_START")
+                stop_value = row.get(f"{motion}_STOP")
+                if stop_value in {None, "", "N/A"}:
+                    continue
+                start, stop = int(start_value), int(stop_value)
+                if start < 0 or stop <= start:
+                    raise ValueError(f"Invalid 100STYLE frame cut for {style}/{motion}")
+                cuts[(style, motion)] = (start, stop)
+    return cuts
+
+
+def _trim_100style(
+    positions: np.ndarray,
+    path: Path,
+    cuts: dict[tuple[str, str], tuple[int, int]],
+) -> np.ndarray:
+    style = path.parent.name
+    prefix = f"{style}_"
+    if not path.stem.startswith(prefix):
+        raise ValueError(f"Unexpected 100STYLE filename: {path}")
+    motion = path.stem.removeprefix(prefix)
+    try:
+        start, stop = cuts[(style, motion)]
+    except KeyError as error:
+        raise ValueError(f"Missing 100STYLE frame cut for {style}/{motion}") from error
+    if stop > len(positions):
+        raise ValueError(
+            f"100STYLE frame cut {start}:{stop} exceeds {len(positions)} frames in {path}"
+        )
+    return positions[start:stop]
 
 
 def _hash_file(path: Path) -> str:
@@ -157,18 +288,74 @@ def _camera_rotations(yaw: np.ndarray, pitch: np.ndarray, roll: np.ndarray) -> n
     return (roll_matrix @ pitch_matrix @ yaw_matrix).astype(np.float32)
 
 
+def _camera_range(config: dict[str, object], name: str) -> tuple[float, float]:
+    value = config[name]
+    if not isinstance(value, list) or len(value) != 2:
+        raise ValueError(f"synthetic_camera.{name} must contain [minimum, maximum]")
+    minimum, maximum = float(value[0]), float(value[1])
+    if not np.isfinite([minimum, maximum]).all() or maximum <= minimum:
+        raise ValueError(f"synthetic_camera.{name} must be a finite increasing range")
+    return minimum, maximum
+
+
+def resolve_camera_simulation(config: dict[str, object] | None) -> dict[str, object]:
+    resolved = dict(DEFAULT_CAMERA_SIMULATION)
+    resolved.update(config or {})
+    for name in (
+        "yaw_degrees",
+        "pitch_degrees",
+        "roll_degrees",
+        "distance_meters",
+        "horizontal_offset_meters",
+        "vertical_offset_meters",
+    ):
+        _camera_range(resolved, name)
+    for name in (
+        "yaw_drift_std_degrees",
+        "pitch_drift_std_degrees",
+        "roll_drift_std_degrees",
+        "translation_drift_std_meters",
+    ):
+        value = float(resolved[name])
+        if not np.isfinite(value) or value < 0:
+            raise ValueError(f"synthetic_camera.{name} must be finite and non-negative")
+        resolved[name] = value
+    if _camera_range(resolved, "distance_meters")[0] <= 0:
+        raise ValueError("synthetic_camera.distance_meters must stay positive")
+    return resolved
+
+
 def _simulate_inputs(
-    joints: np.ndarray, image_feature_dim: int, seed: int
+    joints: np.ndarray,
+    image_feature_dim: int,
+    seed: int,
+    camera_config: dict[str, object] | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    config = resolve_camera_simulation(camera_config)
     generator = np.random.default_rng(seed)
-    yaw = float(generator.uniform(-np.pi, np.pi)) + np.cumsum(
-        generator.normal(0.0, 0.005, size=len(joints))
+    yaw_range = np.deg2rad(_camera_range(config, "yaw_degrees"))
+    pitch_range = np.deg2rad(_camera_range(config, "pitch_degrees"))
+    roll_range = np.deg2rad(_camera_range(config, "roll_degrees"))
+    yaw = float(generator.uniform(*yaw_range)) + np.cumsum(
+        generator.normal(
+            0.0,
+            np.deg2rad(float(config["yaw_drift_std_degrees"])),
+            size=len(joints),
+        )
     )
-    pitch = float(generator.uniform(-0.2, 0.2)) + np.cumsum(
-        generator.normal(0.0, 0.0015, size=len(joints))
+    pitch = float(generator.uniform(*pitch_range)) + np.cumsum(
+        generator.normal(
+            0.0,
+            np.deg2rad(float(config["pitch_drift_std_degrees"])),
+            size=len(joints),
+        )
     )
-    roll = float(generator.uniform(-0.08, 0.08)) + np.cumsum(
-        generator.normal(0.0, 0.0008, size=len(joints))
+    roll = float(generator.uniform(*roll_range)) + np.cumsum(
+        generator.normal(
+            0.0,
+            np.deg2rad(float(config["roll_drift_std_degrees"])),
+            size=len(joints),
+        )
     )
     camera = _camera_rotations(yaw, pitch, roll)
 
@@ -176,14 +363,18 @@ def _simulate_inputs(
     # made root motion unobservable from the simulated detector inputs.
     world = joints - joints[:1, :1]
     camera_points = np.einsum("tij,tkj->tki", camera, world)
+    horizontal_range = _camera_range(config, "horizontal_offset_meters")
+    vertical_range = _camera_range(config, "vertical_offset_meters")
+    distance_range = _camera_range(config, "distance_meters")
+    translation_drift = float(config["translation_drift_std_meters"])
     translation = np.stack(
         (
-            float(generator.uniform(-0.25, 0.25))
-            + np.cumsum(generator.normal(0.0, 0.001, size=len(joints))),
-            float(generator.uniform(-0.15, 0.15))
-            + np.cumsum(generator.normal(0.0, 0.0005, size=len(joints))),
-            float(generator.uniform(3.5, 6.0))
-            + np.cumsum(generator.normal(0.0, 0.001, size=len(joints))),
+            float(generator.uniform(*horizontal_range))
+            + np.cumsum(generator.normal(0.0, translation_drift, size=len(joints))),
+            float(generator.uniform(*vertical_range))
+            + np.cumsum(generator.normal(0.0, translation_drift * 0.5, size=len(joints))),
+            float(generator.uniform(*distance_range))
+            + np.cumsum(generator.normal(0.0, translation_drift, size=len(joints))),
         ),
         axis=-1,
     ).astype(np.float32)
@@ -212,7 +403,11 @@ def _simulate_inputs(
 
 
 def motion_to_arrays(
-    joints: np.ndarray, fps: float, image_feature_dim: int, seed: int = 0
+    joints: np.ndarray,
+    fps: float,
+    image_feature_dim: int,
+    seed: int = 0,
+    camera_config: dict[str, object] | None = None,
 ) -> dict[str, np.ndarray]:
     joints = np.asarray(joints, dtype=np.float32)
     local_rotations = _estimate_local_rotations(joints)
@@ -227,7 +422,7 @@ def motion_to_arrays(
         ..., 0
     ]
     bbox, keypoints, image_features, camera_delta_6d, camera, gravity_view = _simulate_inputs(
-        joints, image_feature_dim, seed
+        joints, image_feature_dim, seed, camera_config
     )
     velocity = np.zeros((len(joints), len(CONTACT_JOINTS)), dtype=np.float32)
     velocity[1:] = (
@@ -265,23 +460,71 @@ def motion_to_arrays(
     }
 
 
-def _sources(entry: DatasetEntry, raw_root: Path) -> list[tuple[Path, tuple[Path, ...]]]:
+def _sources(entry: DatasetEntry, raw_root: Path) -> list[RawSource]:
     dataset_root = raw_root / entry.dataset_id
+    _ensure_extracted(entry, dataset_root)
     if entry.dataset_id == "cmu_mocap":
-        if not any(dataset_root.rglob("*.asf")):
-            for archive_path in dataset_root.glob("*.zip"):
-                extraction_root = dataset_root / archive_path.stem
-                with zipfile.ZipFile(archive_path) as archive:
-                    members = archive.infolist()
-                    if any(
-                        Path(member.filename).is_absolute() or ".." in Path(member.filename).parts
-                        for member in members
-                    ):
-                        raise RuntimeError(f"Unsafe member path in {archive_path}")
-                    archive.extractall(extraction_root)
-        return [(amc, (asf, amc)) for asf, amc in find_cmu_sequences(dataset_root)]
-    paths = sorted([*dataset_root.rglob("*.npz"), *dataset_root.rglob("*.b3d")])
-    return [(path, (path,)) for path in paths]
+        return [RawSource(amc, (asf, amc)) for asf, amc in find_cmu_sequences(dataset_root)]
+    paths = sorted(
+        [
+            *dataset_root.rglob("*.npz"),
+            *dataset_root.rglob("*.b3d"),
+            *dataset_root.rglob("*.bvh"),
+        ]
+    )
+    if member_regex := entry.downloader.get("member_regex"):
+        pattern = re.compile(str(member_regex))
+        paths = [
+            path
+            for path in paths
+            if pattern.search(path.relative_to(dataset_root).as_posix())
+        ]
+    return [RawSource(path, (path,)) for path in paths]
+
+
+def _sequence_slug(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9._-]+", "-", value).strip("-._")
+    return normalized[:80] or "unnamed"
+
+
+def _source_split_group(entry: DatasetEntry, relative: Path) -> str:
+    if entry.dataset_id == "100style":
+        return str(relative.parent)
+    if entry.dataset_id == "cmu_mocap" and "subjects" in relative.parts:
+        subject_index = relative.parts.index("subjects") + 1
+        return "/".join(relative.parts[: subject_index + 1])
+    return str(relative)
+
+
+def _prune_disallowed_outputs(
+    entry: DatasetEntry,
+    output_root: Path,
+    *,
+    converted_any: bool,
+) -> int:
+    member_regex = entry.downloader.get("member_regex")
+    if not converted_any or not member_regex:
+        return 0
+    pattern = re.compile(str(member_regex))
+    removed = 0
+    dataset_output = output_root / entry.dataset_id
+    for path in sorted(dataset_output.rglob("*.npz")) if dataset_output.exists() else []:
+        try:
+            with np.load(path, allow_pickle=False) as archive:
+                provenance = json.loads(str(archive["provenance_json"]))
+        except (KeyError, OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError):
+            continue
+        source_file = str(provenance.get("source_file") or provenance.get("source_sequence", ""))
+        if provenance.get("source_id") == entry.dataset_id and not pattern.search(source_file):
+            path.unlink()
+            removed += 1
+    if removed:
+        print(
+            f"[preprocess] {entry.dataset_id}: removed {removed} stale shard(s) outside the "
+            "configured source partition",
+            flush=True,
+        )
+    return removed
 
 
 def preprocess_dataset(
@@ -291,95 +534,169 @@ def preprocess_dataset(
     *,
     image_feature_dim: int,
     target_fps: float = DEFAULT_TARGET_FPS,
+    camera_config: dict[str, object] | None = None,
     limit: int | None = None,
 ) -> list[Path]:
     written: list[Path] = []
     sources = _sources(entry, raw_root)
-    if limit is not None:
-        sources = sources[:limit]
     if not np.isfinite(target_fps) or target_fps <= 0:
         raise ValueError("target_fps must be a positive finite number")
-    preprocess_hash = stable_hash(
-        {
-            "image_feature_dim": image_feature_dim,
-            "joints": JOINT_NAMES,
-            "target_fps": float(target_fps),
-            "converter_version": CONVERTER_VERSION,
-        }
+    if limit is not None and limit < 1:
+        raise ValueError("limit must be positive")
+    resolved_camera_config = resolve_camera_simulation(camera_config)
+    cuts = (
+        _load_100style_cuts(raw_root / entry.dataset_id)
+        if entry.dataset_id == "100style"
+        else {}
     )
     hash_cache: dict[Path, str] = {}
     cached = 0
     converted = 0
-    print(f"[preprocess] {entry.dataset_id}: {len(sources)} raw sequence(s)", flush=True)
-    for index, (primary, source_paths) in enumerate(sources, start=1):
+    attempted = 0
+    stop = False
+    print(f"[preprocess] {entry.dataset_id}: {len(sources)} raw file(s)", flush=True)
+    for source_index, source in enumerate(sources, start=1):
+        primary, source_paths = source.primary, source.source_paths
         relative = primary.relative_to(raw_root / entry.dataset_id)
-        output = output_root / entry.dataset_id / relative.with_suffix(".npz")
+        source_study = (
+            relative.parts[2]
+            if entry.dataset_id == "addbiomechanics" and len(relative.parts) > 2
+            else None
+        )
         source_hashes: list[str] = []
         for path in source_paths:
             if path not in hash_cache:
                 hash_cache[path] = _hash_file(path)
             source_hashes.append(hash_cache[path])
-        cache_key: dict[str, object] = {
-            "source_id": entry.dataset_id,
-            "source_sequence": str(relative),
-            "source_sha256": source_hashes,
-            "license_id": entry.license_id,
-            "converter_version": CONVERTER_VERSION,
-            "preprocess_hash": preprocess_hash,
+        suffix = primary.suffix.lower()
+        converter_version = (
+            B3D_BVH_CONVERTER_VERSION if suffix in {".b3d", ".bvh"} else CONVERTER_VERSION
+        )
+        preprocess_settings: dict[str, object] = {
+            "image_feature_dim": image_feature_dim,
+            "joints": JOINT_NAMES,
+            "target_fps": float(target_fps),
+            "converter_version": converter_version,
+            "synthetic_camera": resolved_camera_config,
         }
-        if _cached_shard_matches(output, cache_key):
-            cached += 1
-            written.append(output)
-            status = "cached"
-            if index == 1 or index % 10 == 0 or index == len(sources):
+        if entry.dataset_id == "100style":
+            preprocess_settings["trim_100style"] = True
+        preprocess_hash = stable_hash(preprocess_settings)
+        reader = B3DReader(primary) if suffix == ".b3d" else None
+        sequence_specs: list[tuple[int | None, str, str]]
+        if reader is not None:
+            sequence_specs = [
+                (
+                    trial_index,
+                    str(
+                        relative.with_suffix("")
+                        / (
+                            f"trial-{trial_index:04d}-"
+                            f"{_sequence_slug(reader.trial_name(trial_index))}"
+                        )
+                    ),
+                    str(relative.with_suffix("")),
+                )
+                for trial_index in range(reader.trial_count)
+            ]
+        else:
+            split_group = _source_split_group(entry, relative)
+            sequence_specs = [(None, str(relative), split_group)]
+
+        for trial_index, source_sequence, split_group in sequence_specs:
+            if limit is not None and attempted >= limit:
+                stop = True
+                break
+            attempted += 1
+            if trial_index is None:
+                output_relative = relative.with_suffix(".npz")
+            else:
+                output_relative = Path(f"{source_sequence}.npz")
+            output = output_root / entry.dataset_id / output_relative
+            cache_key: dict[str, object] = {
+                "source_id": entry.dataset_id,
+                "source_sequence": source_sequence,
+                "source_sha256": source_hashes,
+                "license_id": entry.license_id,
+                "converter_version": converter_version,
+                "preprocess_hash": preprocess_hash,
+            }
+            if suffix in {".b3d", ".bvh"}:
+                cache_key["source_file"] = str(relative)
+            if source_study is not None:
+                cache_key["source_study"] = source_study
+                if reader is not None and reader.source_href:
+                    cache_key["source_href"] = reader.source_href
+            if trial_index is not None:
+                cache_key["source_trial_index"] = trial_index
+            if _cached_shard_matches(output, cache_key):
+                cached += 1
+                written.append(output)
+                status = "cached"
+            else:
+                if suffix == ".amc":
+                    positions, names, fps = load_asf_amc(source_paths[0], source_paths[1])
+                elif suffix == ".b3d":
+                    assert reader is not None and trial_index is not None
+                    positions, names, fps = reader.load_trial(trial_index)
+                elif suffix == ".bvh":
+                    positions, names, fps = load_bvh(primary)
+                    if entry.dataset_id == "100style":
+                        positions = _trim_100style(positions, primary, cuts)
+                else:
+                    positions, names, fps = load_generic_npz(primary)
+                canonical = (
+                    canonicalize_addbiomechanics(positions, names)
+                    if suffix == ".b3d"
+                    else canonicalize_positions(positions, names)
+                )
+                resampled = resample_positions(canonical, fps, target_fps)
+                arrays = motion_to_arrays(
+                    resampled,
+                    target_fps,
+                    image_feature_dim,
+                    seed=int(stable_hash(source_sequence)[:8], 16),
+                    camera_config=resolved_camera_config,
+                )
+                provenance = {
+                    "source_id": entry.dataset_id,
+                    "source_title": entry.title,
+                    "source_sequence": source_sequence,
+                    "source_file": str(relative),
+                    "split_group": split_group,
+                    "source_sha256": source_hashes,
+                    "license_id": entry.license_id,
+                    "license_url": entry.license_url,
+                    "attribution_required": entry.attribution_required,
+                    "requires_acceptance": entry.requires_acceptance,
+                    "converter_version": converter_version,
+                    "preprocess_hash": preprocess_hash,
+                    "synthetic_camera": resolved_camera_config,
+                    "source_fps": float(fps),
+                    "fps": float(target_fps),
+                    "input_mode": "motion_only",
+                }
+                if entry.dataset_id == "addbiomechanics":
+                    provenance["source_study"] = source_study or relative.parent.name
+                    if reader is not None and reader.source_href:
+                        provenance["source_href"] = reader.source_href
+                if trial_index is not None:
+                    provenance["source_trial_index"] = trial_index
+                    provenance["source_trial_name"] = reader.trial_name(trial_index)
+                write_shard(output, arrays, provenance)
+                converted += 1
+                written.append(output)
+                status = "converted"
+            if attempted == 1 or attempted % 10 == 0:
                 print(
-                    f"[preprocess] {entry.dataset_id}: {index}/{len(sources)} "
-                    f"({converted} converted, {cached} cached) | {relative} [{status}]",
+                    f"[preprocess] {entry.dataset_id}: {attempted} sequence(s) "
+                    f"({converted} converted, {cached} cached) | {source_sequence} [{status}] "
+                    f"raw-file={source_index}/{len(sources)}",
                     flush=True,
                 )
-            continue
-        if primary.suffix.lower() == ".amc":
-            positions, names, fps = load_asf_amc(source_paths[0], source_paths[1])
-        elif primary.suffix.lower() == ".b3d":
-            positions, names, fps = load_b3d(primary)
-        else:
-            positions, names, fps = load_generic_npz(primary)
-        canonical = (
-            canonicalize_addbiomechanics(positions, names)
-            if primary.suffix.lower() == ".b3d"
-            else canonicalize_positions(positions, names)
-        )
-        resampled = resample_positions(canonical, fps, target_fps)
-        arrays = motion_to_arrays(
-            resampled,
-            target_fps,
-            image_feature_dim,
-            seed=int(stable_hash(str(relative))[:8], 16),
-        )
-        provenance = {
-            "source_id": entry.dataset_id,
-            "source_title": entry.title,
-            "source_sequence": str(relative),
-            "source_sha256": source_hashes,
-            "license_id": entry.license_id,
-            "license_url": entry.license_url,
-            "attribution_required": entry.attribution_required,
-            "requires_acceptance": entry.requires_acceptance,
-            "converter_version": CONVERTER_VERSION,
-            "preprocess_hash": preprocess_hash,
-            "source_fps": float(fps),
-            "fps": float(target_fps),
-            "input_mode": "motion_only",
-        }
-        write_shard(output, arrays, provenance)
-        converted += 1
-        written.append(output)
-        if index == 1 or index % 10 == 0 or index == len(sources):
-            print(
-                f"[preprocess] {entry.dataset_id}: {index}/{len(sources)} "
-                f"({converted} converted, {cached} cached) | {relative} [converted]",
-                flush=True,
-            )
+        if stop:
+            break
+    _prune_disallowed_outputs(entry, output_root, converted_any=bool(written))
     print(
         f"[preprocess] {entry.dataset_id}: ready={len(written)} "
         f"converted={converted} cached={cached}",

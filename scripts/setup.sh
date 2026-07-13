@@ -9,9 +9,5 @@ if [[ ! -x "$UV_BIN" ]]; then
   exit 1
 fi
 
-if ! command -v npx >/dev/null 2>&1; then
-  echo "Note: automated mRI downloads additionally require Node.js 18+ with npx." >&2
-fi
-
 cd "$REPO_ROOT"
 exec "$UV_BIN" sync --group dev

@@ -14,9 +14,23 @@ def test_catalog_is_closed_and_auditable() -> None:
         "cmu_mocap",
         "addbiomechanics",
     }
+    assert {entry.dataset_id for entry in catalog.profile("core")} == {
+        "cmu_mocap",
+        "addbiomechanics",
+        "100style",
+    }
+    assert catalog.datasets["100style"].license_id == "CC-BY-4.0"
+    assert catalog.datasets["100style"].downloader["md5"] == (
+        "3cf627852fd8192024c04a8d0ef49583"
+    )
+    assert catalog.datasets["addbiomechanics"].downloader["member_regex"].startswith(
+        "^train/With_Arm/"
+    )
     assert catalog.datasets["sam"].task == "motion"
+    assert not catalog.datasets["sam"].approved_for_training
     assert catalog.datasets["tum_preha"].task == "motion"
     assert catalog.datasets["mri"].task == "paired_video"
+    assert not catalog.datasets["mri"].approved_for_training
     assert catalog.datasets["mri"].downloader["type"] == "dryad_browser"
     assert catalog.datasets["cmu_mocap"].downloader["sha256"] == (
         "4b0fc3a7ba3cbb2aa23948b4cefe7efa45edf864b2b5e00713659a4f2144a591"

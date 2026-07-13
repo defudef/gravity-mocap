@@ -28,12 +28,11 @@ directory:
 ```
 
 The first command only prints the plan. The execute form syncs the environment,
-validates the project, downloads and preprocesses the currently supported CMU
-and AddBiomechanics motion sources, requires shards from both, validates a fresh
-training plan, archives an existing default run, and finally starts training.
-It deliberately does not download SAM or feed mRI into training until their
-release-specific adapters exist. If preparation fails, the previous run is not
-archived and training does not start.
+validates the project, downloads and preprocesses CMU, a study-stratified
+AddBiomechanics train subset, and 100STYLE, requires shards from all three,
+validates a fresh training plan, archives an existing default run, and finally
+starts training. If preparation fails, the previous run is not archived and
+training does not start.
 
 Use the fresh-start script only once per new corpus/configuration. Resume the
 run on later sessions without archiving it again:
@@ -74,7 +73,7 @@ The equivalent manual flow follows.
    ```
 
    The smoke profile downloads the approximately 1 GiB CMU archive and one
-   selected AddBiomechanics sequence. Generated training shards are written to
+   selected AddBiomechanics B3D. Generated training shards are written to
    `Saved/GravityMocap/processed/`.
 
 4. Inspect the paper-size training plan without starting it:
@@ -100,32 +99,21 @@ The equivalent manual flow follows.
 
    Open [http://127.0.0.1:5000](http://127.0.0.1:5000).
 
-### Add the public mRI paired-video data
+### mRI paired-video data is blocked
 
-The mRI download is separate from the small motion-only quickstart. It needs
-about 14.6 GiB plus temporary disk headroom and Node.js 18+ with `npx`:
-
-```sh
-./scripts/mocap.sh download --dataset mri
-./scripts/mocap.sh download --dataset mri --allow-large --execute
-```
-
-The second command opens a temporary Chrome window, needs no account or click,
-verifies both archives, and resumes partial `.part` files when repeated.
-Corrupt completed or partial files are discarded and fetched again
-automatically; a failed resumed checksum triggers one clean retry from byte
-zero. The current generic `preprocess` command does not yet convert mRI's
-release-specific paired-video annotations. Before mRI can contribute visual
-supervision, those annotations must be normalized to the JSONL contract
-described in [Visual features](#visual-features), then encoded and attached to
-matching motion shards.
+mRI is deliberately not in any training profile. Dryad currently labels the
+record CC0, while the original publication describes the release as CC BY-NC
+4.0. Until the conflict is resolved by the rightsholder, explicit mRI download,
+preprocessing, and training requests fail the catalog gate. Any files retained
+from an earlier investigation are ignored by the official training corpus.
 
 ## What is implemented
 
 - closed dataset/license allowlist with fail-closed source validation;
 - resumable HTTP/Hugging Face/Google Drive downloaders and selective remote ZIP
   extraction for the 388 GiB AddBiomechanics archive;
-- generic NPZ, CMU ASF/AMC, and optional AddBiomechanics B3D motion adapters;
+- generic NPZ, CMU ASF/AMC, every trial in an AddBiomechanics B3D, and 100STYLE
+  BVH motion adapters;
 - provenance-bearing, finite-value-validated NPZ shards;
 - canonical 30 FPS preprocessing with source/target rates in provenance;
 - simulated full camera motion, bbox, and 2D-keypoint inputs for motion-only sequences;
@@ -179,48 +167,31 @@ Perform the approved downloads:
 ./scripts/mocap.sh download --profile core --execute
 ```
 
-SAM crosses the 20 GiB safety threshold, so the full core command also needs
-`--allow-large` after the dry-run and disk-space review. SAM contains motion and
-spatial audio, not video. A single source can be selected with
-`--dataset addbiomechanics`.
+A single source can be selected with `--dataset addbiomechanics` or
+`--dataset 100style`.
 
 `smoke` selects only one tiny B3D member from the remote AddBiomechanics ZIP,
-but the CMU archive is still about 1 GiB. `core` adds selected B3D members, SAM,
-and mRI. CMU's server currently omits its TLS intermediate certificate. The
+but the CMU archive is still about 1 GiB. `core` adds the 1.37 GiB 100STYLE
+archive and up to 24 B3Ds selected round-robin across the eight available
+AddBiomechanics studies, capped at 12 GiB uncompressed. CMU's server currently
+omits its TLS intermediate certificate. The
 downloader still tries HTTPS first and permits only a same-host/path HTTP
 fallback protected by the pinned archive SHA-256; TLS verification is never
-disabled. The `core` profile deterministically selects the 12 smallest matching
-AddBiomechanics members (currently about 0.81 GiB total). They show per-file
+disabled. The current AddBiomechanics selection is 24 train-partition B3Ds and
+10.65 GiB. They show per-file
 progress, are written through `.part`, and are promoted only after ZIP size/CRC
-verification; an interrupted member restarts individually. The public mRI
-archives are downloaded automatically without an account: a temporary visible
-Chrome window passes Dryad's intended browser
-challenge, captures a short-lived signed asset URL, cancels the browser
-transfer, and hands the URL to the resumable HTTP downloader. Node.js 18+ with
-`npx` is required only for this Dryad step. The window closes automatically,
-partial `.part` files survive interruption, and every completed archive is
-checked against Dryad's pinned size and SHA-256. The pretrained `.pkl` files
-shipped inside `dataset_release.zip` are ignored and must not be used.
-`expanded` also includes HUM4D paired video and TUM radar/3D-pose motion; TUM
-requires reading and explicitly accepting its Data Usage Agreement.
-
-Download only mRI, first as a dry-run and then for real:
-
-```sh
-./scripts/mocap.sh download --dataset mri
-./scripts/mocap.sh download --dataset mri --allow-large --execute
-```
-
-The execute command opens Chrome but requires no click, login, or account. If
-the connection stops, repeat the same command to obtain a fresh signed URL and
-resume the existing `.part` file. If an existing completed or partial file fails
-the pinned size/checksum verification, it is discarded and downloaded again
-automatically.
+verification; an interrupted member restarts individually.
+SAM, mRI, and HUM4D are catalogued but blocked from official training: their
+raw releases have unresolved participant/license or SMPL/SMPL-X provenance
+questions. `expanded` adds only TUM radar/3D-pose motion and requires reading
+and explicitly accepting its Data Usage Agreement.
 
 Only these raw formats are converted directly today:
 
 - CMU `.asf` + `.amc` pairs;
-- AddBiomechanics `.b3d` through the pinned `nimblephysics` dependency;
+- every trial in AddBiomechanics `.b3d` through the pinned `nimblephysics`
+  dependency;
+- 100STYLE `.bvh`, trimmed by its published `Frame_Cuts.csv`;
 - generic `.npz` with `positions` (or `joints_3d`/`joint_positions`),
   `joint_names`, and optional `fps`.
 
@@ -234,8 +205,10 @@ Preprocessing reports progress every ten sequences. Repeating the command
 reuses atomic shards only when their schema, provenance, source hashes,
 converter version, and preprocessing configuration still match; interrupted or
 stale outputs are regenerated. All supported motion is resampled to 30 FPS,
-and root velocity is stored in metres per second. Changing that temporal
-contract invalidates old shards and checkpoints by design.
+and root velocity is stored in metres per second. All trials from one B3D stay
+in the same train/validation group, so the split cannot leak neighboring trials
+from one source file. Changing that temporal contract or the synthetic-camera
+configuration invalidates old shards and checkpoints by design.
 
 ## External 2D detector contract
 
@@ -252,6 +225,12 @@ epoch to resemble a real detector. Because its random seed is derived from the
 epoch, sequence, and window, a mid-epoch checkpoint resumes with identical
 inputs even when DataLoader workers change. Visual features remain optional and
 are completely gated when `image_mask` is zero.
+
+The clean projection is also deterministic and configurable in
+`configs/datasets.yaml` under `preprocessing.synthetic_camera`: initial camera
+yaw/pitch/roll, distance, and offsets are sampled per sequence, then receive a
+small random-walk drift. Resolved settings are included in every shard's
+provenance and preprocessing hash.
 
 Large paired-video datasets differ in folder layout and annotation format. They
 should first be normalized to the generic contract or a visual JSONL manifest;
@@ -290,7 +269,8 @@ and may also replace `keypoints_2d` and `bbox`.
 
 ### Smaller 11.5M-parameter baseline
 
-The recommended capacity experiment keeps the paper config's dataset, seed,
+The recommended model for the current approximately 31--32 hour `core` corpus
+keeps the paper config's dataset, seed,
 split, augmentations, optimizer, validation, and early stopping unchanged. It
 changes only the Transformer from 12x512 (39.3M parameters) to 6x384 (11.5M)
 and writes to an isolated `Saved/GravityMocap/runs/motion-small/` output.
@@ -310,6 +290,9 @@ Resume the same small-model run later without `--resume never`:
 
 The small and paper checkpoints are architecturally incompatible by design;
 their separate output directories prevent accidental cross-resume.
+
+The corpus and capacity calculation, including the full-AddBiomechanics
+scenario, is recorded in [docs/model-capacity.md](docs/model-capacity.md).
 
 ### Paper-size model
 

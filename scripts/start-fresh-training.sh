@@ -11,9 +11,10 @@ usage() {
   cat <<'EOF'
 Usage: ./scripts/start-fresh-training.sh [--execute] [--max-hours HOURS | --max-epochs EPOCHS]
 
-Prepare the currently supported motion corpus (CMU + AddBiomechanics), archive
-the existing default run, and start a fresh training session. The default is a
-side-effect-free plan. Add --execute to download, preprocess, archive, and train.
+Prepare the currently supported motion corpus (CMU + AddBiomechanics +
+100STYLE), archive the existing default run, and start a fresh training session.
+The default is a side-effect-free plan. Add --execute to download, preprocess,
+archive, and train.
 
 Options:
   --execute            Perform the plan and start training.
@@ -133,7 +134,7 @@ if [[ "$EXECUTE" != true ]]; then
   echo
   echo "PLAN:"
   echo "1. Sync the locked environment and run audit/forward validation."
-  echo "2. Download and preprocess CMU plus the 12 smallest AddBiomechanics sequences."
+  echo "2. Download and preprocess CMU, study-stratified AddBiomechanics train data, and 100STYLE."
   echo "3. Require at least one processed shard from each source."
   if [[ -e "$OUTPUT" || -L "$OUTPUT" ]]; then
     echo "4. Archive the existing output below $(dirname "$OUTPUT")/archive/."
@@ -164,19 +165,22 @@ echo "[fresh-train] downloading trainable motion sources"
   --profile core \
   --dataset cmu_mocap \
   --dataset addbiomechanics \
+  --dataset 100style \
   --execute
 
 echo "[fresh-train] preprocessing trainable motion sources"
 "$REPO_ROOT/scripts/mocap.sh" preprocess \
   --profile core \
   --dataset cmu_mocap \
-  --dataset addbiomechanics
+  --dataset addbiomechanics \
+  --dataset 100style
 
 CMU_SHARDS="$(count_shards "$DATA_ROOT/processed/cmu_mocap")"
 ADDBIO_SHARDS="$(count_shards "$DATA_ROOT/processed/addbiomechanics")"
-echo "[fresh-train] processed shards: cmu_mocap=$CMU_SHARDS addbiomechanics=$ADDBIO_SHARDS"
-if ((CMU_SHARDS < 1 || ADDBIO_SHARDS < 1)); then
-  echo "Both CMU and AddBiomechanics must produce at least one shard; training aborted." >&2
+STYLE_SHARDS="$(count_shards "$DATA_ROOT/processed/100style")"
+echo "[fresh-train] processed shards: cmu_mocap=$CMU_SHARDS addbiomechanics=$ADDBIO_SHARDS 100style=$STYLE_SHARDS"
+if ((CMU_SHARDS < 1 || ADDBIO_SHARDS < 1 || STYLE_SHARDS < 1)); then
+  echo "CMU, AddBiomechanics, and 100STYLE must each produce at least one shard; training aborted." >&2
   exit 1
 fi
 

@@ -43,7 +43,11 @@ def command_audit(args: argparse.Namespace) -> int:
     errors = catalog.audit()
     result = {
         "status": "ok" if not errors else "failed",
-        "approved": sorted(catalog.datasets),
+        "approved": sorted(
+            dataset_id
+            for dataset_id, entry in catalog.datasets.items()
+            if entry.approved_for_training
+        ),
         "blocked": catalog.raw["blocked_sources"],
         "errors": errors,
     }
@@ -85,6 +89,9 @@ def command_preprocess(args: argparse.Namespace) -> int:
         else catalog.profile(args.profile)
     )
     total = 0
+    camera_config = dict(
+        catalog.raw.get("preprocessing", {}).get("synthetic_camera", {})
+    )
     for entry in entries:
         written = preprocess_dataset(
             entry,
@@ -92,6 +99,7 @@ def command_preprocess(args: argparse.Namespace) -> int:
             args.output_root,
             image_feature_dim=args.image_feature_dim,
             target_fps=args.target_fps,
+            camera_config=camera_config,
             limit=args.limit,
         )
         total += len(written)

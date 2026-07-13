@@ -125,11 +125,13 @@ def test_fresh_training_executes_in_order_and_archives_previous_run(
         set -euo pipefail
         echo "mocap $*" >> "$FAKE_LOG"
         if [[ "${1:-}" == "preprocess" ]]; then
-          mkdir -p \
-            "$GRAVITY_MOCAP_DATA_ROOT/processed/cmu_mocap" \
-            "$GRAVITY_MOCAP_DATA_ROOT/processed/addbiomechanics"
-          touch "$GRAVITY_MOCAP_DATA_ROOT/processed/cmu_mocap/sequence.npz"
-          touch "$GRAVITY_MOCAP_DATA_ROOT/processed/addbiomechanics/sequence.npz"
+              mkdir -p \
+                "$GRAVITY_MOCAP_DATA_ROOT/processed/cmu_mocap" \
+                "$GRAVITY_MOCAP_DATA_ROOT/processed/addbiomechanics" \
+                "$GRAVITY_MOCAP_DATA_ROOT/processed/100style"
+              touch "$GRAVITY_MOCAP_DATA_ROOT/processed/cmu_mocap/sequence.npz"
+              touch "$GRAVITY_MOCAP_DATA_ROOT/processed/addbiomechanics/sequence.npz"
+              touch "$GRAVITY_MOCAP_DATA_ROOT/processed/100style/sequence.npz"
         fi
         """,
     )
@@ -165,10 +167,12 @@ def test_fresh_training_executes_in_order_and_archives_previous_run(
         "setup",
         "mocap audit",
         "mocap validate",
-        "mocap download --profile core --dataset cmu_mocap --dataset addbiomechanics --execute",
+        "mocap download --profile core --dataset cmu_mocap --dataset addbiomechanics "
+        "--dataset 100style --execute",
     ]
     assert calls[4] == (
-        "mocap preprocess --profile core --dataset cmu_mocap --dataset addbiomechanics"
+        "mocap preprocess --profile core --dataset cmu_mocap --dataset addbiomechanics "
+        "--dataset 100style"
     )
     assert ".fresh-plan-" in calls[5]
     assert f"args={expected_limit} --resume never" in calls[5]

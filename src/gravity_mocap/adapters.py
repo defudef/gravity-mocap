@@ -12,18 +12,18 @@ ALIASES = {
     "root": ("root", "pelvis", "hips", "hip", "lowerback"),
     "left_hip": ("lhipjoint", "lefthip", "lhip", "leftupleg", "lfemur"),
     "right_hip": ("rhipjoint", "righthip", "rhip", "rightupleg", "rfemur"),
-    "spine_1": ("lowerback", "spine", "spine1", "abdomen"),
+    "spine_1": ("lowerback", "spine", "spine1", "abdomen", "chest"),
     "left_knee": ("leftleg", "leftknee", "lknee", "ltibia"),
     "right_knee": ("rightleg", "rightknee", "rknee", "rtibia"),
-    "spine_2": ("upperback", "spine2", "chest"),
+    "spine_2": ("upperback", "spine2", "chest2"),
     "left_ankle": ("leftfoot", "leftankle", "lankle", "lfoot"),
     "right_ankle": ("rightfoot", "rightankle", "rankle", "rfoot"),
-    "spine_3": ("thorax", "spine3", "upperchest"),
+    "spine_3": ("thorax", "spine3", "upperchest", "chest3", "chest4"),
     "left_toe": ("lefttoebase", "lefttoe", "ltoes", "ltoe"),
     "right_toe": ("righttoebase", "righttoe", "rtoes", "rtoe"),
     "neck": ("lowerneck", "neck", "neck1"),
-    "left_clavicle": ("lclavicle", "leftshoulder", "lcollar"),
-    "right_clavicle": ("rclavicle", "rightshoulder", "rcollar"),
+    "left_clavicle": ("lclavicle", "leftcollar", "lcollar", "leftshoulder"),
+    "right_clavicle": ("rclavicle", "rightcollar", "rcollar", "rightshoulder"),
     "head": ("head", "headend", "upperneck"),
     "left_shoulder": ("lhumerus", "leftarm", "lshoulder"),
     "right_shoulder": ("rhumerus", "rightarm", "rshoulder"),
@@ -165,6 +165,170 @@ def _ordered_rotation(channels: list[str], values: list[float]) -> np.ndarray:
         if channel.lower().startswith("r"):
             result = result @ _axis_rotation(channel, value)
     return result
+
+
+@dataclass(frozen=True)
+class BvhJoint:
+    name: str
+    parent: int
+    offset: np.ndarray
+    channels: tuple[str, ...]
+
+
+def _bvh_axis_rotations(axis: str, degrees: np.ndarray) -> np.ndarray:
+    radians = np.deg2rad(degrees)
+    sine, cosine = np.sin(radians), np.cos(radians)
+    rotations = np.zeros((len(degrees), 3, 3), dtype=np.float64)
+    if axis == "x":
+        rotations[:, 0, 0] = 1.0
+        rotations[:, 1, 1] = cosine
+        rotations[:, 1, 2] = -sine
+        rotations[:, 2, 1] = sine
+        rotations[:, 2, 2] = cosine
+    elif axis == "y":
+        rotations[:, 0, 0] = cosine
+        rotations[:, 0, 2] = sine
+        rotations[:, 1, 1] = 1.0
+        rotations[:, 2, 0] = -sine
+        rotations[:, 2, 2] = cosine
+    elif axis == "z":
+        rotations[:, 0, 0] = cosine
+        rotations[:, 0, 1] = -sine
+        rotations[:, 1, 0] = sine
+        rotations[:, 1, 1] = cosine
+        rotations[:, 2, 2] = 1.0
+    else:
+        raise ValueError(f"Unsupported BVH rotation axis: {axis!r}")
+    return rotations
+
+
+def _parse_bvh_hierarchy(text: str, path: Path) -> list[BvhJoint]:
+    tokens = re.findall(r"[{}]|[^\s{}]+", text)
+    joints: list[BvhJoint] = []
+    cursor = 0
+
+    def take(expected: str | None = None) -> str:
+        nonlocal cursor
+        if cursor >= len(tokens):
+            raise ValueError(f"Unexpected end of BVH hierarchy in {path}")
+        value = tokens[cursor]
+        cursor += 1
+        if expected is not None and value != expected:
+            raise ValueError(f"Expected {expected!r} in {path}, got {value!r}")
+        return value
+
+    def skip_block() -> None:
+        take("{")
+        depth = 1
+        while depth:
+            token = take()
+            depth += token == "{"
+            depth -= token == "}"
+
+    def parse_joint(parent: int) -> None:
+        nonlocal cursor
+        kind = take()
+        if kind not in {"ROOT", "JOINT"}:
+            raise ValueError(f"Expected ROOT/JOINT in {path}, got {kind!r}")
+        name = take()
+        take("{")
+        joint_index = len(joints)
+        joints.append(
+            BvhJoint(
+                name=name,
+                parent=parent,
+                offset=np.zeros(3, dtype=np.float64),
+                channels=(),
+            )
+        )
+        offset = np.zeros(3, dtype=np.float64)
+        channels: tuple[str, ...] = ()
+        while True:
+            token = take()
+            if token == "}":
+                break
+            if token == "OFFSET":
+                offset = np.asarray([float(take()), float(take()), float(take())])
+            elif token == "CHANNELS":
+                channel_count = int(take())
+                channels = tuple(take() for _ in range(channel_count))
+            elif token == "JOINT":
+                cursor_before_joint = cursor - 1
+                cursor = cursor_before_joint
+                parse_joint(joint_index)
+            elif token == "End":
+                take("Site")
+                skip_block()
+            else:
+                raise ValueError(f"Unsupported BVH hierarchy token {token!r} in {path}")
+        joints[joint_index] = BvhJoint(name, parent, offset, channels)
+
+    if take() != "HIERARCHY":
+        raise ValueError(f"{path} does not start with a BVH HIERARCHY section")
+    parse_joint(-1)
+    if cursor != len(tokens):
+        raise ValueError(f"Unexpected trailing BVH hierarchy tokens in {path}")
+    return joints
+
+
+def load_bvh(path: Path) -> tuple[np.ndarray, list[str], float]:
+    """Load joint positions from a BVH file without depending on a body model."""
+    text = path.read_text(errors="replace")
+    motion_match = re.search(r"(?m)^MOTION\s*$", text)
+    if motion_match is None:
+        raise ValueError(f"Missing BVH MOTION section in {path}")
+    joints = _parse_bvh_hierarchy(text[: motion_match.start()], path)
+    lines = [line.strip() for line in text[motion_match.end() :].splitlines() if line.strip()]
+    if len(lines) < 3 or not lines[0].lower().startswith("frames:"):
+        raise ValueError(f"Missing BVH frame count in {path}")
+    frame_count = int(lines[0].split(":", 1)[1])
+    frame_time_match = re.fullmatch(
+        r"frame\s+time\s*:\s*([0-9.eE+-]+)", lines[1], flags=re.IGNORECASE
+    )
+    if frame_time_match is None:
+        raise ValueError(f"Missing BVH frame time in {path}")
+    frame_time = float(frame_time_match.group(1))
+    if frame_time <= 0:
+        raise ValueError(f"Invalid BVH frame time in {path}: {frame_time}")
+    channel_count = sum(len(joint.channels) for joint in joints)
+    values = np.fromstring(" ".join(lines[2:]), dtype=np.float64, sep=" ")
+    expected_values = frame_count * channel_count
+    if values.size != expected_values:
+        raise ValueError(
+            f"BVH motion in {path} has {values.size} values, expected {expected_values}"
+        )
+    values = values.reshape(frame_count, channel_count)
+
+    positions = np.zeros((frame_count, len(joints), 3), dtype=np.float64)
+    world_rotations = np.zeros((frame_count, len(joints), 3, 3), dtype=np.float64)
+    identity = np.repeat(np.eye(3, dtype=np.float64)[None], frame_count, axis=0)
+    channel_offset = 0
+    for joint_index, joint in enumerate(joints):
+        translation = np.repeat(joint.offset[None], frame_count, axis=0)
+        local_rotation = identity.copy()
+        for local_index, channel in enumerate(joint.channels):
+            channel_values = values[:, channel_offset + local_index]
+            normalized = channel.lower()
+            if normalized.endswith("position"):
+                axis = "xyz".index(normalized[0])
+                translation[:, axis] += channel_values
+            elif normalized.endswith("rotation"):
+                local_rotation = local_rotation @ _bvh_axis_rotations(
+                    normalized[0], channel_values
+                )
+            else:
+                raise ValueError(f"Unsupported BVH channel {channel!r} in {path}")
+        channel_offset += len(joint.channels)
+        if joint.parent < 0:
+            positions[:, joint_index] = translation
+            world_rotations[:, joint_index] = local_rotation
+        else:
+            parent_rotation = world_rotations[:, joint.parent]
+            positions[:, joint_index] = positions[:, joint.parent] + np.einsum(
+                "tij,tj->ti", parent_rotation, translation
+            )
+            world_rotations[:, joint_index] = parent_rotation @ local_rotation
+    return positions.astype(np.float32), [joint.name for joint in joints], 1.0 / frame_time
 
 
 @dataclass
@@ -318,27 +482,68 @@ def find_cmu_sequences(root: Path) -> list[tuple[Path, Path]]:
     return pairs
 
 
-def load_b3d(path: Path, processing_pass: int = 0) -> tuple[np.ndarray, list[str], float]:
-    try:
-        import nimblephysics as nimble
-    except ImportError as error:
-        raise RuntimeError(
-            "Reading .b3d requires the optional nimblephysics package. Install it in a compatible "
-            "Python environment, or export the sequence to the generic NPZ contract first."
-        ) from error
-    subject = nimble.biomechanics.SubjectOnDisk(str(path))
-    skeleton = subject.readSkel(processingPass=processing_pass, ignoreGeometry=True)
-    names = [skeleton.getJoint(index).getName() for index in range(skeleton.getNumJoints())]
-    frames = subject.readFrames(
-        0,
-        0,
-        subject.getTrialLength(0),
-        includeSensorData=False,
-        includeProcessingPasses=True,
-    )
-    positions = [
-        frame.processingPasses[processing_pass].jointCenters.reshape(len(names), 3)
-        for frame in frames
-    ]
-    fps = 1.0 / float(subject.getTrialTimestep(0))
-    return np.asarray(positions, dtype=np.float32), names, fps
+class B3DReader:
+    """Keep one B3D subject open while converting each trial independently."""
+
+    def __init__(self, path: Path, processing_pass: int = 0):
+        try:
+            import nimblephysics as nimble
+        except ImportError as error:
+            raise RuntimeError(
+                "Reading .b3d requires the optional nimblephysics package. Install it in a "
+                "compatible Python environment, or export the sequence to the generic NPZ "
+                "contract first."
+            ) from error
+        self.path = path
+        self.processing_pass = processing_pass
+        self.subject = nimble.biomechanics.SubjectOnDisk(str(path))
+        get_href = getattr(self.subject, "getHref", None)
+        self.source_href = str(get_href()).strip() if callable(get_href) else ""
+        skeleton = self.subject.readSkel(
+            processingPass=processing_pass,
+            ignoreGeometry=True,
+        )
+        self.names = [
+            skeleton.getJoint(index).getName() for index in range(skeleton.getNumJoints())
+        ]
+
+    @property
+    def trial_count(self) -> int:
+        return int(self.subject.getNumTrials())
+
+    def trial_name(self, trial_index: int) -> str:
+        return str(self.subject.getTrialName(trial_index))
+
+    def load_trial(self, trial_index: int) -> tuple[np.ndarray, list[str], float]:
+        if not 0 <= trial_index < self.trial_count:
+            raise IndexError(f"B3D trial index {trial_index} is out of range for {self.path}")
+        pass_count = int(self.subject.getTrialNumProcessingPasses(trial_index))
+        if self.processing_pass >= pass_count:
+            raise ValueError(
+                f"B3D trial {trial_index} in {self.path} has {pass_count} processing pass(es), "
+                f"cannot read pass {self.processing_pass}"
+            )
+        frame_count = int(self.subject.getTrialLength(trial_index))
+        if frame_count < 2:
+            raise ValueError(f"B3D trial {trial_index} in {self.path} has fewer than two frames")
+        frames = self.subject.readFrames(
+            trial_index,
+            0,
+            frame_count,
+            includeSensorData=False,
+            includeProcessingPasses=True,
+        )
+        positions = [
+            frame.processingPasses[self.processing_pass].jointCenters.reshape(
+                len(self.names), 3
+            )
+            for frame in frames
+        ]
+        fps = 1.0 / float(self.subject.getTrialTimestep(trial_index))
+        return np.asarray(positions, dtype=np.float32), self.names, fps
+
+
+def load_b3d(
+    path: Path, processing_pass: int = 0, trial_index: int = 0
+) -> tuple[np.ndarray, list[str], float]:
+    return B3DReader(path, processing_pass=processing_pass).load_trial(trial_index)

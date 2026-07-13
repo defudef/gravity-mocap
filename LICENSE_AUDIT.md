@@ -24,13 +24,20 @@ configs, weights, caches, and derived SMPL parameters are explicitly blocked.
 | Source | Terms used by this project | Approved role | Required handling |
 | --- | --- | --- | --- |
 | [CMU Mocap](https://mocap.cs.cmu.edu/) | CMU permits all uses and inclusion in commercial products, but not resale of the data itself | motion | Preserve CMU acknowledgement; do not redistribute the raw/converted dataset as a product |
-| [AddBiomechanics data](https://addbiomechanics.org/data_sharing_mission.html) | CC BY 4.0 | motion | Preserve per-dataset `DATA_CITATIONS.txt` and attribution; the AddBiomechanics application is GPLv3 but its code is not used |
-| [SAM](https://huggingface.co/datasets/JimSYXu/SAM) | CC BY 4.0 | motion + spatial audio | Attribute the dataset; it is not paired video |
-| [mRI](https://datadryad.org/dataset/doi:10.5061/dryad.9ghx3ffpp) | CC0 1.0 | paired blurred RGB + 3D/2D pose | Require both pinned archives; ignore bundled pretrained `.pkl` models |
-| [HUM4D](https://parkyeeun23.github.io/HUM4D/) | CC BY 4.0 | paired RGB-D + Vicon joints | Use only imagery/calibration/joints; SMPL/SMPL-X parameters are prohibited |
+| [AddBiomechanics data](https://addbiomechanics.org/data_sharing_mission.html) | CC BY 4.0 | motion | Preserve source-study identity, the B3D source href, and original-publication attribution; the AddBiomechanics application is GPLv3 but its code is not used |
+| [100STYLE](https://www.ianxmason.com/100style/) | CC BY 4.0 | styled BVH motion | Preserve author/dataset attribution and the checksum-pinned Zenodo source |
 | [TUM prehabilitation](https://zenodo.org/records/19866202) | CC BY 4.0 plus Data Usage Agreement | radar + camera-derived 3D pose | Explicit acceptance, DOI attribution, no re-identification/contact/tracking/profiling; released files are not paired RGB supervision |
 
-AMASS, BEDLAM, Human3.6M, 3DPW, HumanML3D, and the GVHMR repository remain
+The default `core` profile uses only CMU, AddBiomechanics `train/With_Arm`, and
+100STYLE. TUM is opt-in through `expanded` and requires explicit DUA acceptance.
+
+| Blocked source | Why it cannot enter official checkpoints |
+| --- | --- |
+| [SAM](https://huggingface.co/datasets/JimSYXu/SAM) | The repository label is CC BY 4.0, but the raw motion scope and participant clearance need confirmation; audio and SMPL-X derivatives are excluded |
+| [mRI](https://datadryad.org/dataset/doi:10.5061/dryad.9ghx3ffpp) | Dryad metadata says CC0 while the original publication states CC BY-NC 4.0; bundled pretrained models are also excluded |
+| [HUM4D](https://parkyeeun23.github.io/HUM4D/) | Public processing depends on non-commercial SMPL/SMPL-X assets and the standalone raw Vicon-joint scope is unclear |
+
+AMASS, BEDLAM, Human3.6M, 3DPW, HumanML3D, and the GVHMR repository also remain
 blocked. Unknown `source_id` or license IDs fail closed. Generic NPZ input is
 rejected when any field name indicates SMPL, SMPL-X, body pose/shape, global
 orientation, or another parametric body model.
