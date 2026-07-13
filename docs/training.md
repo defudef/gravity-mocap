@@ -219,9 +219,12 @@ The trainer flushes a terminal line after the first optimizer step, every
 uses `1`, which shows epoch/batch/global-step position, total loss, learning
 rate, step pace, elapsed time, ETA, every checkpoint save, and the final stop
 reason. Validation prints an explicit `START` line followed by a `DONE` summary
-with validation loss, MPJPE, root drift, contact F1, duration, best loss, and
-current early-stopping patience. This makes a slow MPS/CUDA step or validation
-pass distinguishable from a hung process.
+with the full-epoch mean train loss beside validation loss, MPJPE, root drift,
+contact F1, duration, best loss, and current early-stopping patience. Train loss
+includes detector augmentation while validation is clean, so their trends and
+growing gap matter more than equality of the raw values. This also makes a slow
+MPS/CUDA step or validation pass distinguishable from a hung process. A
+mid-epoch resume reports `train_loss=partial` for that first incomplete epoch.
 
 MLflow is enabled in both training configs. With `tracking_uri: auto`, it uses:
 

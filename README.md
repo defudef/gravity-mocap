@@ -346,7 +346,7 @@ immediately visible:
 [mlflow] run=... | experiment=gravity-mocap | tracking=sqlite:////.../mlflow.db
 [train] epoch 8/500 | batch 1/1 | step 8/500 | loss 0.369439 | lr 2.00e-04 | warming up | elapsed 1m 01s | ETA 1h 03m
 [validation] START | epoch 8/500 | windows=1,025
-[validation] DONE | epoch 8/500 | val_loss=0.488491 | MPJPE=29.73cm | root_drift=59.97cm | contact_F1=0.2500 | time=26s | best=0.488491 | IMPROVED | early_stop=0/20
+[validation] DONE | epoch 8/500 | train_loss=0.612345 | val_loss=0.488491 | MPJPE=29.73cm | root_drift=59.97cm | contact_F1=0.2500 | time=26s | best=0.488491 | IMPROVED | early_stop=0/20
 ```
 
 Open the local MLflow UI in a second terminal:

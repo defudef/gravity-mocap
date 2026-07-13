@@ -771,13 +771,15 @@ def run_training(
                             "resumed_from": resumed_from,
                         }
 
+                epoch_metrics: dict[str, float] | None = None
                 if epoch_metric_steps and start_batch == 0:
+                    epoch_metrics = {
+                        name: value / epoch_metric_steps
+                        for name, value in epoch_metric_sums.items()
+                    }
                     tracker.log_epoch(
                         epoch=epoch,
-                        metrics={
-                            name: value / epoch_metric_steps
-                            for name, value in epoch_metric_sums.items()
-                        },
+                        metrics=epoch_metrics,
                         global_step=progress.global_step,
                     )
                 if (
@@ -817,6 +819,7 @@ def run_training(
                         epoch=epoch,
                         epochs=epochs,
                         metrics=validation_metrics,
+                        train_loss=(epoch_metrics or {}).get("total"),
                         elapsed_seconds=validation_elapsed,
                         improved=validation_improved,
                         best_loss=progress.best_validation_loss,

@@ -172,14 +172,17 @@ class ProgressLogger:
         epoch: int,
         epochs: int,
         metrics: dict[str, float],
+        train_loss: float | None,
         elapsed_seconds: float,
         improved: bool,
         best_loss: float | None,
         validations_without_improvement: int | None,
         patience: int | None,
     ) -> None:
+        train_loss_summary = "partial" if train_loss is None else f"{train_loss:.6f}"
         parts = [
             f"[validation] DONE | epoch {epoch}/{epochs}",
+            f"train_loss={train_loss_summary}",
             f"val_loss={metrics['loss.total']:.6f}",
             f"MPJPE={metrics['mpjpe_m'] * 100:.2f}cm",
             f"root_drift={metrics['root_local_drift_m'] * 100:.2f}cm",
