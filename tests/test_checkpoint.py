@@ -16,7 +16,14 @@ from gravity_mocap.checkpoint import (
     save_training_checkpoint,
 )
 from gravity_mocap.fixture import create_fixture
-from gravity_mocap.trainer import build_model, load_config, training_plan
+from gravity_mocap.schema import read_shard, write_shard
+from gravity_mocap.trainer import (
+    _epoch_session_limit_reached,
+    _validate_session_limits,
+    build_model,
+    load_config,
+    training_plan,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -113,6 +120,22 @@ def test_epoch_limit_can_change_but_optimizer_settings_cannot() -> None:
         "logging": {**config["logging"], "log_every_steps": 20},
     }
     assert compatibility_hash(changed_logging) == compatibility_hash(config)
+    changed_augmentation = {
+        **config,
+        "data": {
+            **config["data"],
+            "augmentation": {
+                **config["data"]["augmentation"],
+                "keypoint_noise_std": 0.25,
+            },
+        },
+    }
+    assert compatibility_hash(changed_augmentation) != compatibility_hash(config)
+    changed_validation_schedule = {
+        **config,
+        "validation": {**config["validation"], "every_epochs": 10},
+    }
+    assert compatibility_hash(changed_validation_schedule) == compatibility_hash(config)
 
 
 def test_cleanup_removes_only_uncommitted_checkpoint_temps(tmp_path: Path) -> None:
@@ -147,10 +170,62 @@ def test_training_plan_never_constructs_an_optimizer(
         raise AssertionError("dry-run must not construct an optimizer")
 
     monkeypatch.setattr(torch.optim, "AdamW", fail_if_called)
-    plan = training_plan(config_path, tmp_path / "run", max_hours=8)
+    plan = training_plan(config_path, tmp_path / "run", max_epochs=8)
 
     assert plan["ready"] is True
     assert plan["action_on_execute"] == "start_new"
-    assert plan["max_hours_this_session"] == 8
+    assert plan["max_hours_this_session"] is None
+    assert plan["max_epochs_this_session"] == 8
     assert plan["progress_logging"]["mlflow_enabled"] is True
     assert not (tmp_path / "run" / "mlflow" / "mlflow.db").exists()
+
+
+def test_training_session_limits_are_positive_and_mutually_exclusive() -> None:
+    _validate_session_limits(max_hours=1, max_epochs=None)
+    _validate_session_limits(max_hours=None, max_epochs=3)
+
+    with pytest.raises(ValueError, match="max_hours must be positive"):
+        _validate_session_limits(max_hours=0, max_epochs=None)
+    with pytest.raises(ValueError, match="max_epochs must be positive"):
+        _validate_session_limits(max_hours=None, max_epochs=0)
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        _validate_session_limits(max_hours=1, max_epochs=3)
+
+
+def test_epoch_session_limit_counts_a_resumed_partial_epoch() -> None:
+    assert not _epoch_session_limit_reached(epoch=9, session_start_epoch=9, max_epochs=2)
+    assert _epoch_session_limit_reached(epoch=10, session_start_epoch=9, max_epochs=2)
+    assert _epoch_session_limit_reached(epoch=9, session_start_epoch=9, max_epochs=1)
+    assert not _epoch_session_limit_reached(epoch=100, session_start_epoch=9, max_epochs=None)
+
+
+def test_training_plan_reports_sequence_disjoint_validation_split(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/train-smoke.yaml")
+    data_root = tmp_path / "fixtures"
+    create_fixture(data_root / "synthetic" / "walk-a.npz", frames=16, image_feature_dim=32)
+    second_path = create_fixture(
+        data_root / "synthetic" / "walk-b.npz", frames=16, image_feature_dim=32
+    )
+    second_arrays, second_provenance = read_shard(second_path)
+    second_provenance["source_sequence"] = "walk-cycle-002"
+    write_shard(second_path, second_arrays, second_provenance)
+    config["data"].update(
+        {
+            "root": str(data_root),
+            "catalog": str(ROOT / "configs/datasets.yaml"),
+            "validation_fraction": 0.5,
+        }
+    )
+    config["validation"]["enabled"] = True
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+
+    plan = training_plan(config_path, tmp_path / "run")
+
+    assert plan["ready"] is True
+    assert plan["data_split"]["status"] == "ok"
+    assert plan["data_split"]["train_sequences"] == 1
+    assert plan["data_split"]["validation_sequences"] == 1
+    assert plan["data_split"]["train_windows"] > 0
+    assert plan["data_split"]["validation_windows"] > 0
+    assert plan["data_split"]["target_fps"] == 30

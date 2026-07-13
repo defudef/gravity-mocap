@@ -91,10 +91,11 @@ def command_preprocess(args: argparse.Namespace) -> int:
             args.raw_root,
             args.output_root,
             image_feature_dim=args.image_feature_dim,
+            target_fps=args.target_fps,
             limit=args.limit,
         )
         total += len(written)
-        print(f"{entry.dataset_id}: wrote {len(written)} shard(s)")
+        print(f"{entry.dataset_id}: {len(written)} shard(s) ready")
     if total == 0:
         print(
             "No supported raw sequences found. Download/extract data or use "
@@ -142,6 +143,7 @@ def command_train(args: argparse.Namespace) -> int:
             args.output,
             resume=args.resume,
             max_hours=args.max_hours,
+            max_epochs=args.max_epochs,
         )
         print(json.dumps(plan, indent=2))
         print("DRY RUN: training did not start. Add --execute only when you want to train.")
@@ -151,6 +153,7 @@ def command_train(args: argparse.Namespace) -> int:
         args.output,
         resume=args.resume,
         max_hours=args.max_hours,
+        max_epochs=args.max_epochs,
     )
     print(json.dumps(result, indent=2))
     return 0
@@ -231,6 +234,7 @@ def build_parser() -> argparse.ArgumentParser:
     preprocess.add_argument("--raw-root", type=Path, default=DEFAULT_RAW)
     preprocess.add_argument("--output-root", type=Path, default=DEFAULT_PROCESSED)
     preprocess.add_argument("--image-feature-dim", type=int, default=512)
+    preprocess.add_argument("--target-fps", type=float, default=30.0)
     preprocess.add_argument("--limit", type=int)
     preprocess.set_defaults(handler=command_preprocess)
 
@@ -256,10 +260,16 @@ def build_parser() -> argparse.ArgumentParser:
         default="auto",
         help="auto (default), never, or an explicit checkpoint path",
     )
-    train.add_argument(
+    session_limit = train.add_mutually_exclusive_group()
+    session_limit.add_argument(
         "--max-hours",
         type=float,
         help="Stop safely after this many hours and continue on the next invocation",
+    )
+    session_limit.add_argument(
+        "--max-epochs",
+        type=int,
+        help="Stop safely after this many completed epochs and continue next time",
     )
     train.add_argument("--execute", action="store_true")
     train.set_defaults(handler=command_train)

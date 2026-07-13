@@ -40,11 +40,21 @@ Each frame fuses four independently projected inputs by element-wise addition:
 
 The production config uses 12 relative Transformer blocks, 8 attention heads,
 512 hidden dimensions, RoPE, and a receptive-field attention mask. Motion-only
-datasets receive deterministic simulated static/dynamic camera paths, projected
-2D joints, and zero visual features. Paired-video shards use features from the
-from-scratch crop encoder. The trainer uses CUDA mixed precision, all visible
+datasets are resampled to 30 FPS and receive deterministic simulated yaw,
+pitch, roll, translation, projected 2D joints, and zero visual features. Root
+translation is preserved in the bbox input and root velocity is measured in
+metres per second. Paired-video shards use features from the from-scratch crop
+encoder; zero-feature motion shards gate that modality completely. The trainer
+uses CUDA mixed precision, all visible
 CUDA devices through `DataParallel`, micro-batches of 16, and 16-step gradient
 accumulation for an effective batch of 256; CPU/MPS remain valid slower paths.
+
+The paper config treats a permissively licensed 2D pose estimator as a
+replaceable frontend. Clean projected points are corrupted deterministically
+with coordinate noise, confidence degradation, missing joints/frames,
+contiguous occlusion, bbox jitter, and whole-window camera-input dropout. The
+seed includes epoch, sequence path, and window start, so exact mid-epoch resume
+does not depend on DataLoader worker RNG state.
 
 ## Dataset gate
 
@@ -66,6 +76,23 @@ embeds it in checkpoints.
 
 ## Operator flow
 
+For a path-independent fresh run using the currently supported CMU and
+AddBiomechanics converters, preview and then execute the repository workflow:
+
+```sh
+./scripts/start-fresh-training.sh
+./scripts/start-fresh-training.sh --execute --max-hours 2
+./scripts/start-fresh-training.sh --execute --max-epochs 10
+```
+
+Execution synchronizes the environment, validates the allowlist/model,
+downloads and preprocesses both sources, verifies that each produced shards,
+dry-runs a new output, archives the previous default run, and starts training.
+Any failure before the archive step leaves the previous run in place. This
+command intentionally starts fresh; subsequent sessions resume with
+`./scripts/train.sh --execute --max-hours 2` or
+`./scripts/train.sh --execute --max-epochs 10`.
+
 Install and validate without training:
 
 ```sh
@@ -80,6 +107,25 @@ Plan data acquisition:
 ```sh
 ./scripts/mocap.sh download --profile core
 ```
+
+For AddBiomechanics, `core` deterministically selects the 12 smallest matching
+B3D members rather than archive order (currently about 0.81 GiB instead of more
+than 9 GiB). Each member is written atomically through `.part`, reports
+progress, and must match the ZIP directory's size and CRC before use.
+
+Preprocessing logs progress every ten sequences and is safely repeatable.
+Existing atomic shards are reused only when their schema, provenance hash,
+source hashes, converter version, and preprocessing hash match the current
+input; stale or interrupted outputs are regenerated. The current converter
+records both source FPS and canonical 30 FPS. An older non-resampled corpus is
+therefore regenerated automatically, and its old checkpoint cannot be resumed
+against the new BOM/configuration.
+
+CMU's archive host currently serves an incomplete TLS chain. Downloads attempt
+HTTPS normally. Only an SSL chain failure may select the configured HTTP URL,
+and only when its hostname/path match HTTPS and the full archive SHA-256 is
+pinned. The completed archive must pass both size and SHA-256 verification; the
+implementation never uses `verify=False`.
 
 The mRI release is public and requires no account. Dryad places a JavaScript
 browser challenge in front of the file stream, so the downloader launches a
@@ -127,6 +173,12 @@ For repeatable overnight sessions:
 ./scripts/train.sh --execute --max-hours 8
 ```
 
+For a fixed number of completed epochs per session instead of a time budget:
+
+```sh
+./scripts/train.sh --execute --max-epochs 10
+```
+
 The same command resumes `latest.pt` on every subsequent night. The checkpoint
 contains model, optimizer, AMP scaler, RNG and exact next epoch/batch/global
 step. It is replaced atomically every 15 minutes and after every epoch;
@@ -134,6 +186,21 @@ step. It is replaced atomically every 15 minutes and after every epoch;
 requests a save at the next optimizer boundary. A second Ctrl+C aborts without
 waiting. Increasing the target epoch count is compatible; model, data BOM,
 optimizer, loss, sequence, and seed drift fail closed.
+
+`--max-epochs N` counts completed epochs in the current invocation, including a
+partially completed epoch resumed from a checkpoint. It saves at the epoch
+boundary and the next invocation continues with the following epoch. The limit
+does not replace the total `train.epochs` target. `--max-hours` and
+`--max-epochs` are mutually exclusive.
+
+The production split is deterministic and source-stratified: 5% of each source
+is held out by whole subject where identity is available, otherwise by whole
+sequence, never by overlapping window. Validation inputs
+are clean and never receive detector augmentation. At every completed epoch the
+trainer writes `validation-state.json` and logs held-out loss components,
+MPJPE, root-velocity error, integrated local root drift, acceleration error,
+and contact F1. The split fraction, split seed, target FPS, and augmentation
+settings are checkpoint compatibility inputs.
 
 ## Progress and MLflow
 
@@ -167,12 +234,13 @@ One logical training job remains one MLflow run across safe stops. Its run ID
 is written immediately to `mlflow-run.json` and included in every subsequent
 full-state checkpoint. Resume first uses the checkpoint ID and falls back to
 the JSON file for checkpoints made before MLflow support existed. A completed
-job ends as `FINISHED`; a safe `max_hours`/signal stop ends the current session
-as `KILLED`, and the next start reopens the same run; an exception records
-`FAILED` plus a bounded error tag.
+job ends as `FINISHED`; a safe `max_hours`/`max_epochs`/signal stop ends the
+current session as `KILLED`, and the next start reopens the same run; an
+exception records `FAILED` plus a bounded error tag.
 
 Step metrics contain each loss component, total loss, epoch, learning rate,
-elapsed seconds, and steps per second. Epoch means are logged separately.
+elapsed seconds, and steps per second. Epoch means and held-out validation
+metrics are logged separately.
 Artifacts contain the resolved config, data BOM, readable training state, and
 a checkpoint manifest with path, size, reason, and progress. To avoid copying a
 large checkpoint on every periodic/epoch save, the `.pt` itself is not copied

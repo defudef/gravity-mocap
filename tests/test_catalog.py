@@ -18,6 +18,12 @@ def test_catalog_is_closed_and_auditable() -> None:
     assert catalog.datasets["tum_preha"].task == "motion"
     assert catalog.datasets["mri"].task == "paired_video"
     assert catalog.datasets["mri"].downloader["type"] == "dryad_browser"
+    assert catalog.datasets["cmu_mocap"].downloader["sha256"] == (
+        "4b0fc3a7ba3cbb2aa23948b4cefe7efa45edf864b2b5e00713659a4f2144a591"
+    )
+    assert catalog.datasets["cmu_mocap"].downloader["tls_fallback_url"] == (
+        "http://mocap.cs.cmu.edu/allasfamc.zip"
+    )
     assert {item["filename"] for item in catalog.datasets["mri"].downloader["files"]} == {
         "dataset_release.zip",
         "blurred_videos.zip",

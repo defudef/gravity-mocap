@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import zipfile
 from pathlib import Path
 
@@ -15,10 +16,11 @@ from .adapters import (
     load_generic_npz,
 )
 from .catalog import DatasetEntry
-from .schema import stable_hash, write_shard
+from .schema import REQUIRED_ARRAYS, SCHEMA_VERSION, stable_hash, write_shard
 from .skeleton import CONTACT_JOINTS, JOINT_NAMES, PARENTS, REST_OFFSETS
 
-CONVERTER_VERSION = "cleanroom-v1"
+CONVERTER_VERSION = "cleanroom-v2"
+DEFAULT_TARGET_FPS = 30.0
 
 
 def _hash_file(path: Path) -> str:
@@ -27,6 +29,24 @@ def _hash_file(path: Path) -> str:
         for block in iter(lambda: handle.read(4 * 1024 * 1024), b""):
             checksum.update(block)
     return checksum.hexdigest()
+
+
+def _cached_shard_matches(path: Path, expected: dict[str, object]) -> bool:
+    if not path.exists():
+        return False
+    try:
+        with np.load(path, allow_pickle=False) as archive:
+            if not set(REQUIRED_ARRAYS).issubset(archive.files) or "provenance_json" not in archive:
+                return False
+            provenance = json.loads(str(archive["provenance_json"]))
+    except (EOFError, KeyError, OSError, ValueError, zipfile.BadZipFile, json.JSONDecodeError):
+        return False
+    if provenance.get("schema_version") != SCHEMA_VERSION:
+        return False
+    stored_hash = provenance.pop("provenance_hash", None)
+    if stored_hash != stable_hash(provenance):
+        return False
+    return all(provenance.get(name) == value for name, value in expected.items())
 
 
 def _align_vectors(source: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -82,6 +102,61 @@ def _estimate_local_rotations(joints: np.ndarray) -> np.ndarray:
     return np.concatenate((local[..., :, 0], local[..., :, 1]), axis=-1).astype(np.float32)
 
 
+def resample_positions(
+    joints: np.ndarray, source_fps: float, target_fps: float = DEFAULT_TARGET_FPS
+) -> np.ndarray:
+    """Linearly resample joint positions to one canonical temporal rate."""
+    joints = np.asarray(joints, dtype=np.float32)
+    if joints.ndim != 3 or joints.shape[-1] != 3 or len(joints) < 2:
+        raise ValueError(f"Expected at least two frames shaped (T, J, 3), got {joints.shape}")
+    if not np.isfinite(source_fps) or source_fps <= 0:
+        raise ValueError("source_fps must be a positive finite number")
+    if not np.isfinite(target_fps) or target_fps <= 0:
+        raise ValueError("target_fps must be a positive finite number")
+    if np.isclose(source_fps, target_fps):
+        return joints.copy()
+
+    duration = (len(joints) - 1) / float(source_fps)
+    target_frames = max(2, int(np.floor(duration * target_fps)) + 1)
+    source_times = np.arange(len(joints), dtype=np.float64) / float(source_fps)
+    target_times = np.arange(target_frames, dtype=np.float64) / float(target_fps)
+    flattened = joints.reshape(len(joints), -1)
+    resampled = np.empty((target_frames, flattened.shape[1]), dtype=np.float32)
+    for column in range(flattened.shape[1]):
+        resampled[:, column] = np.interp(target_times, source_times, flattened[:, column]).astype(
+            np.float32
+        )
+    return resampled.reshape(target_frames, *joints.shape[1:])
+
+
+def _camera_rotations(yaw: np.ndarray, pitch: np.ndarray, roll: np.ndarray) -> np.ndarray:
+    frames = len(yaw)
+    yaw_matrix = np.zeros((frames, 3, 3), dtype=np.float32)
+    yaw_cosine, yaw_sine = np.cos(yaw), np.sin(yaw)
+    yaw_matrix[:, 0, 0] = yaw_cosine
+    yaw_matrix[:, 0, 2] = -yaw_sine
+    yaw_matrix[:, 1, 1] = 1.0
+    yaw_matrix[:, 2, 0] = yaw_sine
+    yaw_matrix[:, 2, 2] = yaw_cosine
+
+    pitch_matrix = np.zeros_like(yaw_matrix)
+    pitch_cosine, pitch_sine = np.cos(pitch), np.sin(pitch)
+    pitch_matrix[:, 0, 0] = 1.0
+    pitch_matrix[:, 1, 1] = pitch_cosine
+    pitch_matrix[:, 1, 2] = -pitch_sine
+    pitch_matrix[:, 2, 1] = pitch_sine
+    pitch_matrix[:, 2, 2] = pitch_cosine
+
+    roll_matrix = np.zeros_like(yaw_matrix)
+    roll_cosine, roll_sine = np.cos(roll), np.sin(roll)
+    roll_matrix[:, 0, 0] = roll_cosine
+    roll_matrix[:, 0, 1] = -roll_sine
+    roll_matrix[:, 1, 0] = roll_sine
+    roll_matrix[:, 1, 1] = roll_cosine
+    roll_matrix[:, 2, 2] = 1.0
+    return (roll_matrix @ pitch_matrix @ yaw_matrix).astype(np.float32)
+
+
 def _simulate_inputs(
     joints: np.ndarray, image_feature_dim: int, seed: int
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
@@ -89,16 +164,30 @@ def _simulate_inputs(
     yaw = float(generator.uniform(-np.pi, np.pi)) + np.cumsum(
         generator.normal(0.0, 0.005, size=len(joints))
     )
-    cosine, sine = np.cos(yaw), np.sin(yaw)
-    camera = np.zeros((len(joints), 3, 3), dtype=np.float32)
-    camera[:, 0, 0] = cosine
-    camera[:, 0, 2] = -sine
-    camera[:, 1, 1] = 1
-    camera[:, 2, 0] = sine
-    camera[:, 2, 2] = cosine
-    centered = joints - joints[:, :1]
-    camera_points = np.einsum("tij,tkj->tki", camera, centered)
-    camera_points[..., 2] += 4.0
+    pitch = float(generator.uniform(-0.2, 0.2)) + np.cumsum(
+        generator.normal(0.0, 0.0015, size=len(joints))
+    )
+    roll = float(generator.uniform(-0.08, 0.08)) + np.cumsum(
+        generator.normal(0.0, 0.0008, size=len(joints))
+    )
+    camera = _camera_rotations(yaw, pitch, roll)
+
+    # Keep actor translation relative to the first frame. Per-frame root centering
+    # made root motion unobservable from the simulated detector inputs.
+    world = joints - joints[:1, :1]
+    camera_points = np.einsum("tij,tkj->tki", camera, world)
+    translation = np.stack(
+        (
+            float(generator.uniform(-0.25, 0.25))
+            + np.cumsum(generator.normal(0.0, 0.001, size=len(joints))),
+            float(generator.uniform(-0.15, 0.15))
+            + np.cumsum(generator.normal(0.0, 0.0005, size=len(joints))),
+            float(generator.uniform(3.5, 6.0))
+            + np.cumsum(generator.normal(0.0, 0.001, size=len(joints))),
+        ),
+        axis=-1,
+    ).astype(np.float32)
+    camera_points += translation[:, None]
     xy = camera_points[..., :2] / np.maximum(camera_points[..., 2:], 0.25)
     minimum = xy.min(axis=1)
     maximum = xy.max(axis=1)
@@ -129,7 +218,7 @@ def motion_to_arrays(
     local_rotations = _estimate_local_rotations(joints)
     root_world = joints[:, 0]
     root_displacement = np.zeros_like(root_world)
-    root_displacement[:-1] = root_world[1:] - root_world[:-1]
+    root_displacement[:-1] = (root_world[1:] - root_world[:-1]) * float(fps)
     root_matrices = np.stack(
         (local_rotations[:, 0, :3], local_rotations[:, 0, 3:], np.zeros_like(root_world)), axis=-1
     )
@@ -201,13 +290,54 @@ def preprocess_dataset(
     output_root: Path,
     *,
     image_feature_dim: int,
+    target_fps: float = DEFAULT_TARGET_FPS,
     limit: int | None = None,
 ) -> list[Path]:
     written: list[Path] = []
     sources = _sources(entry, raw_root)
     if limit is not None:
         sources = sources[:limit]
-    for primary, source_paths in sources:
+    if not np.isfinite(target_fps) or target_fps <= 0:
+        raise ValueError("target_fps must be a positive finite number")
+    preprocess_hash = stable_hash(
+        {
+            "image_feature_dim": image_feature_dim,
+            "joints": JOINT_NAMES,
+            "target_fps": float(target_fps),
+            "converter_version": CONVERTER_VERSION,
+        }
+    )
+    hash_cache: dict[Path, str] = {}
+    cached = 0
+    converted = 0
+    print(f"[preprocess] {entry.dataset_id}: {len(sources)} raw sequence(s)", flush=True)
+    for index, (primary, source_paths) in enumerate(sources, start=1):
+        relative = primary.relative_to(raw_root / entry.dataset_id)
+        output = output_root / entry.dataset_id / relative.with_suffix(".npz")
+        source_hashes: list[str] = []
+        for path in source_paths:
+            if path not in hash_cache:
+                hash_cache[path] = _hash_file(path)
+            source_hashes.append(hash_cache[path])
+        cache_key: dict[str, object] = {
+            "source_id": entry.dataset_id,
+            "source_sequence": str(relative),
+            "source_sha256": source_hashes,
+            "license_id": entry.license_id,
+            "converter_version": CONVERTER_VERSION,
+            "preprocess_hash": preprocess_hash,
+        }
+        if _cached_shard_matches(output, cache_key):
+            cached += 1
+            written.append(output)
+            status = "cached"
+            if index == 1 or index % 10 == 0 or index == len(sources):
+                print(
+                    f"[preprocess] {entry.dataset_id}: {index}/{len(sources)} "
+                    f"({converted} converted, {cached} cached) | {relative} [{status}]",
+                    flush=True,
+                )
+            continue
         if primary.suffix.lower() == ".amc":
             positions, names, fps = load_asf_amc(source_paths[0], source_paths[1])
         elif primary.suffix.lower() == ".b3d":
@@ -219,27 +349,40 @@ def preprocess_dataset(
             if primary.suffix.lower() == ".b3d"
             else canonicalize_positions(positions, names)
         )
+        resampled = resample_positions(canonical, fps, target_fps)
         arrays = motion_to_arrays(
-            canonical, fps, image_feature_dim, seed=int(stable_hash(str(primary))[:8], 16)
+            resampled,
+            target_fps,
+            image_feature_dim,
+            seed=int(stable_hash(str(relative))[:8], 16),
         )
-        relative = primary.relative_to(raw_root / entry.dataset_id)
-        output = output_root / entry.dataset_id / relative.with_suffix(".npz")
         provenance = {
             "source_id": entry.dataset_id,
             "source_title": entry.title,
             "source_sequence": str(relative),
-            "source_sha256": [_hash_file(path) for path in source_paths],
+            "source_sha256": source_hashes,
             "license_id": entry.license_id,
             "license_url": entry.license_url,
             "attribution_required": entry.attribution_required,
             "requires_acceptance": entry.requires_acceptance,
             "converter_version": CONVERTER_VERSION,
-            "preprocess_hash": stable_hash(
-                {"image_feature_dim": image_feature_dim, "joints": JOINT_NAMES}
-            ),
-            "fps": fps,
+            "preprocess_hash": preprocess_hash,
+            "source_fps": float(fps),
+            "fps": float(target_fps),
             "input_mode": "motion_only",
         }
         write_shard(output, arrays, provenance)
+        converted += 1
         written.append(output)
+        if index == 1 or index % 10 == 0 or index == len(sources):
+            print(
+                f"[preprocess] {entry.dataset_id}: {index}/{len(sources)} "
+                f"({converted} converted, {cached} cached) | {relative} [converted]",
+                flush=True,
+            )
+    print(
+        f"[preprocess] {entry.dataset_id}: ready={len(written)} "
+        f"converted={converted} cached={cached}",
+        flush=True,
+    )
     return written

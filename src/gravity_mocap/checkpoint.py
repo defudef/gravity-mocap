@@ -54,9 +54,13 @@ def compatibility_payload(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "seed": config["seed"],
         "data": {
+            "target_fps": data["target_fps"],
             "sequence_length": data["sequence_length"],
             "stride": data["stride"],
             "allow_synthetic": data.get("allow_synthetic", False),
+            "validation_fraction": data.get("validation_fraction", 0.0),
+            "split_seed": data.get("split_seed", 0),
+            "augmentation": data.get("augmentation", {}),
         },
         "model": config["model"],
         "optimizer": {

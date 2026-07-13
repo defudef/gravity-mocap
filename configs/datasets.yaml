@@ -22,8 +22,10 @@ datasets:
     downloader:
       type: http
       url: https://mocap.cs.cmu.edu/allasfamc.zip
+      tls_fallback_url: http://mocap.cs.cmu.edu/allasfamc.zip
       filename: allasfamc.zip
       expected_bytes: 1083549385
+      sha256: 4b0fc3a7ba3cbb2aa23948b4cefe7efa45edf864b2b5e00713659a4f2144a591
 
   addbiomechanics:
     title: AddBiomechanics Dataset

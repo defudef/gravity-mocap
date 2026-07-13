@@ -153,6 +153,13 @@ class ProgressLogger:
             f"{progress.next_batch} | reason={reason}"
         )
 
+    def validation(self, *, epoch: int, metrics: dict[str, float]) -> None:
+        summary_names = ("loss.total", "mpjpe_m", "root_local_drift_m", "contact_f1")
+        summary = " | ".join(
+            f"{name}={metrics[name]:.6f}" for name in summary_names if name in metrics
+        )
+        self._write(f"[validation] epoch={epoch} | {summary}")
+
     def finish(self, *, status: str, reason: str | None, progress: TrainingProgress) -> None:
         suffix = f" | reason={reason}" if reason else ""
         self._write(
@@ -294,6 +301,15 @@ class MLflowTracker:
             step=global_step,
         )
         self._mlflow.log_metric("progress.completed_epoch", float(epoch), step=global_step)
+
+    def log_validation(self, *, epoch: int, metrics: dict[str, float], global_step: int) -> None:
+        if self.run_id is None or not metrics:
+            return
+        self._mlflow.log_metrics(
+            {f"validation.{name}": value for name, value in metrics.items()},
+            step=global_step,
+        )
+        self._mlflow.log_metric("validation.epoch", float(epoch), step=global_step)
 
     def log_checkpoint(self, path: Path, progress: TrainingProgress, *, reason: str) -> None:
         if self.run_id is None:

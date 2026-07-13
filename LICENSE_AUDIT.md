@@ -35,6 +35,14 @@ blocked. Unknown `source_id` or license IDs fail closed. Generic NPZ input is
 rejected when any field name indicates SMPL, SMPL-X, body pose/shape, global
 orientation, or another parametric body model.
 
+The official CMU bulk archive host currently omits its intermediate TLS
+certificate. The downloader attempts verified HTTPS first and never disables
+certificate verification. A fallback is accepted only for the configured HTTP
+URL with the same hostname/path and a pinned SHA-256 derived from the official
+HTTPS archive; size and SHA-256 are checked before the file becomes usable.
+This is a source-integrity exception for one static archive, not a general TLS
+downgrade mechanism.
+
 ## Python and GPU dependencies
 
 Dependencies are installed from their publishers and are not vendored or

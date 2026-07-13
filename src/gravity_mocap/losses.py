@@ -54,9 +54,10 @@ def compute_losses(
     losses["joints_3d"] = _masked_mean((predicted_joints - target["joints_3d"]).square(), mask)
 
     projected = predicted_joints[..., :2] / predicted_joints[..., 2:].abs().clamp_min(0.25)
-    keypoint_confidence = target["keypoints_2d"][..., 2] * target["image_mask"].unsqueeze(-1)
+    reprojection_target = target.get("keypoints_2d_target", target["keypoints_2d"])
+    keypoint_confidence = reprojection_target[..., 2] * target["image_mask"].unsqueeze(-1)
     losses["reprojection_2d"] = _masked_mean(
-        (projected - target["keypoints_2d"][..., :2]).square(), keypoint_confidence
+        (projected - reprojection_target[..., :2]).square(), keypoint_confidence
     )
     velocity_delta = (
         prediction["root_velocity_local"][:, 1:] - prediction["root_velocity_local"][:, :-1]

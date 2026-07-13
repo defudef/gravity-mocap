@@ -16,6 +16,40 @@ print a plan until `--execute` is supplied.
 Run these commands in order. Commands without `--execute` are safe previews and
 do not start a download or training job.
 
+For the shortest path to a **fresh** two-hour training run, use the repository
+script. It resolves every default path from its own location, so it contains no
+developer-specific checkout path and can also be invoked from another working
+directory:
+
+```sh
+./scripts/start-fresh-training.sh
+./scripts/start-fresh-training.sh --execute --max-hours 2
+./scripts/start-fresh-training.sh --execute --max-epochs 10
+```
+
+The first command only prints the plan. The execute form syncs the environment,
+validates the project, downloads and preprocesses the currently supported CMU
+and AddBiomechanics motion sources, requires shards from both, validates a fresh
+training plan, archives an existing default run, and finally starts training.
+It deliberately does not download SAM or feed mRI into training until their
+release-specific adapters exist. If preparation fails, the previous run is not
+archived and training does not start.
+
+Use the fresh-start script only once per new corpus/configuration. Resume the
+run on later sessions without archiving it again:
+
+```sh
+./scripts/train.sh --execute --max-hours 2
+./scripts/train.sh --execute --max-epochs 10
+```
+
+`--max-epochs N` limits only the current invocation to `N` completed epochs.
+Repeating the command resumes `latest.pt` and trains another `N` epochs, up to
+the total target in the config. Use either `--max-hours` or `--max-epochs`, not
+both.
+
+The equivalent manual flow follows.
+
 1. Clone the repository and install the locked environment:
 
    ```sh
@@ -93,7 +127,11 @@ matching motion shards.
   extraction for the 388 GiB AddBiomechanics archive;
 - generic NPZ, CMU ASF/AMC, and optional AddBiomechanics B3D motion adapters;
 - provenance-bearing, finite-value-validated NPZ shards;
-- simulated camera, bbox, and 2D-keypoint inputs for motion-only sequences;
+- canonical 30 FPS preprocessing with source/target rates in provenance;
+- simulated full camera motion, bbox, and 2D-keypoint inputs for motion-only sequences;
+- deterministic detector corruption (noise, low confidence, missing joints,
+  occlusion, bbox jitter, and optional unknown-camera input);
+- source-stratified, subject/sequence-disjoint validation with 3D motion metrics;
 - neutral skeleton local rotations, root motion, and six stationary contacts;
 - early-fusion relative Transformer with RoPE and the paper-size 12-layer,
   8-head, 512-hidden configuration;
@@ -147,8 +185,15 @@ spatial audio, not video. A single source can be selected with
 
 `smoke` selects only one tiny B3D member from the remote AddBiomechanics ZIP,
 but the CMU archive is still about 1 GiB. `core` adds selected B3D members, SAM,
-and mRI. The public mRI archives are downloaded automatically without an
-account: a temporary visible Chrome window passes Dryad's intended browser
+and mRI. CMU's server currently omits its TLS intermediate certificate. The
+downloader still tries HTTPS first and permits only a same-host/path HTTP
+fallback protected by the pinned archive SHA-256; TLS verification is never
+disabled. The `core` profile deterministically selects the 12 smallest matching
+AddBiomechanics members (currently about 0.81 GiB total). They show per-file
+progress, are written through `.part`, and are promoted only after ZIP size/CRC
+verification; an interrupted member restarts individually. The public mRI
+archives are downloaded automatically without an account: a temporary visible
+Chrome window passes Dryad's intended browser
 challenge, captures a short-lived signed asset URL, cancels the browser
 transfer, and hands the URL to the resumable HTTP downloader. Node.js 18+ with
 `npx` is required only for this Dryad step. The window closes automatically,
@@ -183,6 +228,29 @@ Convert downloaded motion sources:
 ```sh
 ./scripts/mocap.sh preprocess --profile core
 ```
+
+Preprocessing reports progress every ten sequences. Repeating the command
+reuses atomic shards only when their schema, provenance, source hashes,
+converter version, and preprocessing configuration still match; interrupted or
+stale outputs are regenerated. All supported motion is resampled to 30 FPS,
+and root velocity is stored in metres per second. Changing that temporal
+contract invalidates old shards and checkpoints by design.
+
+## External 2D detector contract
+
+The motion model does not require a particular detector. A frontend maps its
+output to the canonical 22-joint order from `src/gravity_mocap/skeleton.py`,
+then supplies one `[x, y, confidence]` row per joint. `x/y` are normalized to
+`[-1, 1]` within the person's bbox; the bbox itself is `[x1, y1, x2, y2]`
+normalized to the full frame's `[-1, 1]` coordinates. The
+`normalize_detector_inputs` helper converts pixel values to this contract.
+Missing joints use confidence `0` and zero coordinates.
+
+The training loader deterministically degrades clean projected keypoints per
+epoch to resemble a real detector. Because its random seed is derived from the
+epoch, sequence, and window, a mid-epoch checkpoint resumes with identical
+inputs even when DataLoader workers change. Visual features remain optional and
+are completely gated when `image_mask` is zero.
 
 Large paired-video datasets differ in folder layout and annotation format. They
 should first be normalized to the generic contract or a visual JSONL manifest;
@@ -237,6 +305,12 @@ For an eight-hour overnight session that stops safely:
 ./scripts/train.sh --execute --max-hours 8
 ```
 
+To stop after a fixed number of completed epochs instead of elapsed time:
+
+```sh
+./scripts/train.sh --execute --max-epochs 10
+```
+
 Run the same command on the next night. `--resume auto` is the default, so it
 loads `latest.pt` together with optimizer, AMP scaler, RNG, epoch, batch, and
 global-step state. A checkpoint is atomically replaced every 15 minutes and at
@@ -246,8 +320,17 @@ also readable in `training-state.json`.
 Press Ctrl+C once for a graceful save at the next optimizer-step boundary.
 SIGTERM behaves the same way. A second Ctrl+C is a hard abort. Resume rejects a
 changed model, optimizer, loss, sequence setup, or dataset BOM; increasing only
-the target epoch count is allowed. Use a new output directory for an
+the target epoch count is allowed. `--max-epochs` is a per-session limit and
+does not change that configured total. Use a new output directory for an
 intentionally incompatible run, or `--resume never` to require an empty one.
+
+The paper config holds out 5% of each source by complete subject when identity
+is available, otherwise by complete sequence. Validation
+never receives detector corruption and runs after every completed epoch. It
+logs held-out component losses, MPJPE, root-velocity error, integrated local
+root drift, acceleration error, and contact F1 to MLflow and writes the latest
+snapshot to `validation-state.json`. No validation window comes from a training
+subject/sequence holdout unit.
 
 Training prints one line per optimizer step by default, so a healthy run is
 immediately visible:
@@ -271,8 +354,9 @@ environment; the training environment uses the smaller Apache-2.0
 `Saved/GravityMocap/mlflow/` and are ignored by Git.
 
 MLflow records flattened config parameters, all component losses, epoch means,
-learning rate, elapsed time, throughput, `resolved-config.json`, `data-bom.json`,
-`training-state.json`, and a checkpoint manifest. The same run ID is kept in
+held-out validation metrics, learning rate, elapsed time, throughput,
+`resolved-config.json`, `data-bom.json`, `training-state.json`, and a checkpoint
+manifest. The same run ID is kept in
 `latest.pt` and `mlflow-run.json`, so repeated overnight sessions append to one
 run. Full checkpoint upload is off by default to avoid duplicating a roughly
 450 MB file at every save; set `logging.mlflow.log_checkpoints: true` only when

@@ -27,8 +27,14 @@ from .checkpoint import (
     resolve_resume_path,
     save_training_checkpoint,
 )
-from .data import MotionWindowDataset, audit_training_data, discover_shards
+from .data import (
+    MotionWindowDataset,
+    audit_training_data,
+    discover_shards,
+    partition_sequence_paths,
+)
 from .losses import compute_losses
+from .metrics import compute_motion_metrics
 from .model import GravityViewMotionModel
 from .tracking import MLflowTracker, ProgressLogger, resolve_tracking
 
@@ -51,6 +57,55 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("checkpoint_every_minutes must be positive")
     if int(config["train"]["keep_last_checkpoints"]) < 1:
         raise ValueError("keep_last_checkpoints must be at least 1")
+    data_config = config["data"]
+    data_config.setdefault("target_fps", 30.0)
+    data_config.setdefault("validation_fraction", 0.0)
+    data_config.setdefault("split_seed", int(config["seed"]))
+    if float(data_config["target_fps"]) <= 0:
+        raise ValueError("data.target_fps must be positive")
+    validation_fraction = float(data_config["validation_fraction"])
+    if not 0 <= validation_fraction < 1:
+        raise ValueError("data.validation_fraction must be in [0, 1)")
+    augmentation = data_config.setdefault("augmentation", {"enabled": False})
+    augmentation.setdefault("enabled", False)
+    probability_names = (
+        "keypoint_dropout_probability",
+        "frame_dropout_probability",
+        "occlusion_probability",
+        "camera_dropout_probability",
+    )
+    for name in probability_names:
+        augmentation.setdefault(name, 0.0)
+        if not 0 <= float(augmentation[name]) <= 1:
+            raise ValueError(f"data.augmentation.{name} must be in [0, 1]")
+    augmentation.setdefault("keypoint_noise_std", 0.0)
+    augmentation.setdefault("confidence_min", 1.0)
+    augmentation.setdefault("occlusion_min_frames", 1)
+    augmentation.setdefault("occlusion_max_frames", 1)
+    augmentation.setdefault("occlusion_joint_fraction", 0.25)
+    augmentation.setdefault("bbox_jitter_std", 0.0)
+    if float(augmentation["keypoint_noise_std"]) < 0:
+        raise ValueError("data.augmentation.keypoint_noise_std cannot be negative")
+    if not 0 <= float(augmentation["confidence_min"]) <= 1:
+        raise ValueError("data.augmentation.confidence_min must be in [0, 1]")
+    if int(augmentation["occlusion_min_frames"]) < 1 or int(
+        augmentation["occlusion_max_frames"]
+    ) < int(augmentation["occlusion_min_frames"]):
+        raise ValueError("data.augmentation occlusion frame range is invalid")
+    if not 0 < float(augmentation["occlusion_joint_fraction"]) <= 1:
+        raise ValueError("data.augmentation.occlusion_joint_fraction must be in (0, 1]")
+    if float(augmentation["bbox_jitter_std"]) < 0:
+        raise ValueError("data.augmentation.bbox_jitter_std cannot be negative")
+    validation_config = config.setdefault("validation", {})
+    validation_config.setdefault("enabled", validation_fraction > 0)
+    validation_config.setdefault("every_epochs", 1)
+    validation_config.setdefault("batch_size", int(config["train"]["batch_size"]))
+    if int(validation_config["every_epochs"]) < 1:
+        raise ValueError("validation.every_epochs must be at least 1")
+    if int(validation_config["batch_size"]) < 1:
+        raise ValueError("validation.batch_size must be at least 1")
+    if bool(validation_config["enabled"]) and validation_fraction <= 0:
+        raise ValueError("enabled validation requires data.validation_fraction > 0")
     logging_config = config.setdefault("logging", {})
     logging_config.setdefault("log_every_steps", 1)
     mlflow_config = logging_config.setdefault("mlflow", {})
@@ -78,8 +133,64 @@ def _audit_data(config: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict
         DatasetCatalog(Path(config["data"]["catalog"])),
         allow_synthetic=bool(config["data"].get("allow_synthetic", False)),
         image_feature_dim=int(config["model"]["image_feature_dim"]),
+        expected_fps=float(config["data"]["target_fps"]),
     )
     return inventory, errors, bill_of_materials
+
+
+def _split_paths(
+    config: dict[str, Any], bill_of_materials: dict[str, Any]
+) -> tuple[list[Path], list[Path], dict[Path, str]]:
+    root = Path(config["data"]["root"])
+    paths: list[Path] = []
+    group_keys: dict[Path, str] = {}
+    for shard in bill_of_materials["shards"]:
+        path = root / shard["path"]
+        source_id = str(shard.get("source_id"))
+        sequence = Path(str(shard.get("source_sequence") or shard["path"]))
+        if source_id == "cmu_mocap" and "subjects" in sequence.parts:
+            subject_index = sequence.parts.index("subjects") + 1
+            unit = "/".join(sequence.parts[: subject_index + 1])
+        elif source_id == "addbiomechanics":
+            unit = str(sequence.parent)
+        else:
+            unit = str(sequence)
+        paths.append(path)
+        group_keys[path] = f"{source_id}:{unit}"
+    train_paths, validation_paths = partition_sequence_paths(
+        paths,
+        root,
+        validation_fraction=float(config["data"]["validation_fraction"]),
+        split_seed=int(config["data"]["split_seed"]),
+        group_keys=group_keys,
+    )
+    return train_paths, validation_paths, group_keys
+
+
+def _window_count(frame_count: int, sequence_length: int, stride: int) -> int:
+    starts = list(range(0, max(frame_count - sequence_length + 1, 1), stride))
+    final = max(frame_count - sequence_length, 0)
+    return len(starts) + (not starts or starts[-1] != final)
+
+
+def _split_window_counts(
+    config: dict[str, Any],
+    bill_of_materials: dict[str, Any],
+    train_paths: list[Path],
+    validation_paths: list[Path],
+) -> tuple[int, int]:
+    root = Path(config["data"]["root"])
+    frames = {str(shard["path"]): int(shard["frames"]) for shard in bill_of_materials["shards"]}
+    sequence_length = int(config["data"]["sequence_length"])
+    stride = int(config["data"]["stride"])
+
+    def count(paths: list[Path]) -> int:
+        return sum(
+            _window_count(frames[str(path.relative_to(root))], sequence_length, stride)
+            for path in paths
+        )
+
+    return count(train_paths), count(validation_paths)
 
 
 def training_plan(
@@ -88,12 +199,19 @@ def training_plan(
     *,
     resume: str = "auto",
     max_hours: float | None = None,
+    max_epochs: int | None = None,
 ) -> dict[str, Any]:
-    if max_hours is not None and max_hours <= 0:
-        raise ValueError("max_hours must be positive")
+    _validate_session_limits(max_hours=max_hours, max_epochs=max_epochs)
     config = load_config(config_path)
     root = Path(config["data"]["root"])
     inventory, license_errors, bill_of_materials = _audit_data(config)
+    train_paths, validation_paths, group_keys = _split_paths(config, bill_of_materials)
+    train_windows, validation_windows = _split_window_counts(
+        config, bill_of_materials, train_paths, validation_paths
+    )
+    split_errors: list[str] = []
+    if bool(config["validation"]["enabled"]) and not validation_paths:
+        split_errors.append("validation is enabled but the dataset cannot produce a holdout split")
     model = build_model(config)
     resume_path = resolve_resume_path(output, resume)
     state = read_training_state(output)
@@ -108,7 +226,13 @@ def training_plan(
                 resume_errors.append("saved checkpoint data BOM differs from current shards")
             if int(state.get("next_epoch", 1)) > int(config["train"]["epochs"]):
                 action = "already_complete"
-    ready = not license_errors and not resume_errors and inventory["shards"] > 0
+    ready = (
+        not license_errors
+        and not split_errors
+        and not resume_errors
+        and inventory["shards"] > 0
+        and bool(train_paths)
+    )
     tracking_uri, _ = resolve_tracking(config, output)
     return {
         "mode": "DRY RUN - no optimizer or training loop executed",
@@ -120,6 +244,20 @@ def training_plan(
         "output": str(output.resolve()),
         "data_root": str(root),
         "inventory": inventory,
+        "data_split": {
+            "status": "ok" if not split_errors else "failed",
+            "errors": split_errors,
+            "strategy": "stable source-stratified subject/sequence-disjoint hash partition",
+            "target_fps": config["data"]["target_fps"],
+            "train_sequences": len(train_paths),
+            "validation_sequences": len(validation_paths),
+            "train_units": len({group_keys[path] for path in train_paths}),
+            "validation_units": len({group_keys[path] for path in validation_paths}),
+            "train_windows": train_windows,
+            "validation_windows": validation_windows,
+            "validation_fraction": config["data"]["validation_fraction"],
+            "split_seed": config["data"]["split_seed"],
+        },
         "license_audit": {
             "status": "ok" if not license_errors else "failed",
             "errors": license_errors,
@@ -137,6 +275,9 @@ def training_plan(
         "epochs": config["train"]["epochs"],
         "checkpoint_every_minutes": config["train"]["checkpoint_every_minutes"],
         "max_hours_this_session": max_hours,
+        "max_epochs_this_session": max_epochs,
+        "detector_augmentation": config["data"]["augmentation"],
+        "validation": config["validation"],
         "progress_logging": {
             "every_optimizer_steps": config["logging"]["log_every_steps"],
             "mlflow_enabled": config["logging"]["mlflow"]["enabled"],
@@ -144,6 +285,21 @@ def training_plan(
             "note": "dry-run does not create an MLflow database or run",
         },
     }
+
+
+def _validate_session_limits(*, max_hours: float | None, max_epochs: int | None) -> None:
+    if max_hours is not None and max_hours <= 0:
+        raise ValueError("max_hours must be positive")
+    if max_epochs is not None and max_epochs <= 0:
+        raise ValueError("max_epochs must be positive")
+    if max_hours is not None and max_epochs is not None:
+        raise ValueError("max_hours and max_epochs are mutually exclusive")
+
+
+def _epoch_session_limit_reached(
+    *, epoch: int, session_start_epoch: int, max_epochs: int | None
+) -> bool:
+    return max_epochs is not None and epoch - session_start_epoch + 1 >= max_epochs
 
 
 def _device(value: str) -> torch.device:
@@ -191,15 +347,61 @@ def _write_json(path: Path, value: dict[str, Any]) -> None:
     temporary.replace(path)
 
 
+def evaluate_model(
+    model: torch.nn.Module,
+    dataset: MotionWindowDataset,
+    config: dict[str, Any],
+    device: torch.device,
+    *,
+    use_amp: bool,
+) -> dict[str, float]:
+    """Run a forward-only held-out evaluation without mutating training state."""
+    loader = DataLoader(
+        dataset,
+        batch_size=int(config["validation"]["batch_size"]),
+        shuffle=False,
+        num_workers=int(config["data"]["num_workers"]),
+    )
+    model.eval()
+    metric_sums: dict[str, float] = {}
+    windows = 0
+    with torch.no_grad():
+        for batch in loader:
+            batch = {name: value.to(device) for name, value in batch.items()}
+            batch_windows = int(batch["frame_mask"].shape[0])
+            with torch.autocast(
+                device_type=device.type,
+                dtype=torch.float16,
+                enabled=use_amp,
+            ):
+                prediction = model(batch)
+                losses = compute_losses(prediction, batch, config["loss"])
+                motion_metrics = compute_motion_metrics(
+                    prediction,
+                    batch,
+                    fps=float(config["data"]["target_fps"]),
+                )
+            values = {
+                **{f"loss.{name}": value for name, value in losses.items()},
+                **motion_metrics,
+            }
+            for name, value in values.items():
+                metric_sums[name] = metric_sums.get(name, 0.0) + float(value.cpu()) * batch_windows
+            windows += batch_windows
+    if windows == 0:
+        raise RuntimeError("Validation dataset contains no windows")
+    return {name: value / windows for name, value in metric_sums.items()}
+
+
 def run_training(
     config_path: Path,
     output: Path,
     *,
     resume: str = "auto",
     max_hours: float | None = None,
+    max_epochs: int | None = None,
 ) -> dict[str, Any]:
-    if max_hours is not None and max_hours <= 0:
-        raise ValueError("max_hours must be positive")
+    _validate_session_limits(max_hours=max_hours, max_epochs=max_epochs)
     config = load_config(config_path)
     root = Path(config["data"]["root"])
     _, license_errors, bill_of_materials = _audit_data(config)
@@ -209,13 +411,25 @@ def run_training(
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
+    train_paths, validation_paths, _ = _split_paths(config, bill_of_materials)
     dataset = MotionWindowDataset(
         root,
         int(config["data"]["sequence_length"]),
         int(config["data"]["stride"]),
+        paths=train_paths,
+        augmentation=config["data"]["augmentation"],
+        augmentation_seed=seed,
     )
     if not dataset:
         raise RuntimeError("No valid preprocessed shards found; training did not start")
+    validation_dataset = MotionWindowDataset(
+        root,
+        int(config["data"]["sequence_length"]),
+        int(config["data"]["stride"]),
+        paths=validation_paths,
+    )
+    if bool(config["validation"]["enabled"]) and not validation_dataset:
+        raise RuntimeError("Validation is enabled but the holdout split contains no windows")
 
     device = _device(config["train"]["device"])
     model = build_model(config).to(device)
@@ -281,6 +495,7 @@ def run_training(
     checkpoint_seconds = float(config["train"]["checkpoint_every_minutes"]) * 60
     session_started = time.monotonic()
     session_start_step = progress.global_step
+    session_start_epoch = progress.next_epoch
     elapsed_before_session = progress.elapsed_seconds
     deadline = session_started + max_hours * 3600 if max_hours is not None else None
     last_checkpoint_at = session_started
@@ -349,6 +564,7 @@ def run_training(
             for epoch in range(progress.next_epoch, epochs + 1):
                 epoch_metric_sums: dict[str, float] = {}
                 epoch_metric_steps = 0
+                dataset.set_epoch(epoch)
                 all_batches = _epoch_batches(len(dataset), batch_size, seed, epoch)
                 start_batch = progress.next_batch if epoch == progress.next_epoch else 0
                 if start_batch > len(all_batches):
@@ -463,13 +679,49 @@ def run_training(
                         },
                         global_step=progress.global_step,
                     )
+                if (
+                    bool(config["validation"]["enabled"])
+                    and epoch % int(config["validation"]["every_epochs"]) == 0
+                ):
+                    validation_metrics = evaluate_model(
+                        training_model,
+                        validation_dataset,
+                        config,
+                        device,
+                        use_amp=use_amp,
+                    )
+                    logger.validation(epoch=epoch, metrics=validation_metrics)
+                    tracker.log_validation(
+                        epoch=epoch,
+                        metrics=validation_metrics,
+                        global_step=progress.global_step,
+                    )
+                    _write_json(
+                        output / "validation-state.json",
+                        {
+                            "epoch": epoch,
+                            "global_step": progress.global_step,
+                            "sequences": validation_dataset.sequence_count,
+                            "windows": len(validation_dataset),
+                            "metrics": validation_metrics,
+                        },
+                    )
+                if epoch < epochs:
+                    if _epoch_session_limit_reached(
+                        epoch=epoch,
+                        session_start_epoch=session_start_epoch,
+                        max_epochs=max_epochs,
+                    ):
+                        stop.reason = "max_epochs"
+                    elif deadline is not None and time.monotonic() >= deadline:
+                        stop.reason = "max_hours"
                 progress = save_progress(
                     next_epoch=epoch + 1,
                     next_batch=0,
                     last_loss=last_loss,
                     complete=epoch == epochs,
-                    stop_reason="completed" if epoch == epochs else None,
-                    reason="completed" if epoch == epochs else "epoch",
+                    stop_reason=("completed" if epoch == epochs else stop.reason),
+                    reason=("completed" if epoch == epochs else stop.reason or "epoch"),
                 )
                 if epoch % int(config["train"]["checkpoint_every"]) == 0:
                     archive_latest_checkpoint(
@@ -478,6 +730,14 @@ def run_training(
                         keep=int(config["train"]["keep_last_checkpoints"]),
                     )
                 next_epoch, next_batch = epoch + 1, 0
+                if stop.reason is not None and epoch < epochs:
+                    tracker.finish(status="KILLED", reason=stop.reason)
+                    logger.finish(status="stopped safely", reason=stop.reason, progress=progress)
+                    return {
+                        **asdict(progress),
+                        "status": "stopped_safely",
+                        "resumed_from": resumed_from,
+                    }
     except BaseException as error:
         tracker.fail(error)
         logger.finish(status="failed", reason=str(error), progress=progress)

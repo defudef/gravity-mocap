@@ -140,7 +140,8 @@ class GravityViewMotionModel(nn.Module):
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         tokens = self.modalities["bbox"](batch["bbox"])
         tokens = tokens + self.modalities["keypoints_2d"](batch["keypoints_2d"].flatten(-2))
-        tokens = tokens + self.modalities["image_features"](batch["image_features"])
+        image_tokens = self.modalities["image_features"](batch["image_features"])
+        tokens = tokens + image_tokens * batch["image_mask"].unsqueeze(-1)
         tokens = tokens + self.modalities["camera_delta_6d"](batch["camera_delta_6d"])
         for block in self.blocks:
             tokens = block(tokens)
