@@ -8,6 +8,7 @@ import numpy as np
 import torch
 
 from .artifacts import write_json_atomic, write_npz_atomic
+from .avatar import AVATAR_RENDER_VERSION
 from .inference import _render_motion_preview
 from .rig2d import load_rig_2d
 from .rotations import rotation_6d_to_matrix
@@ -71,6 +72,7 @@ def infer_detector_baseline(
 
     request = {
         "detector_baseline_version": DETECTOR_BASELINE_VERSION,
+        "avatar_render_version": AVATAR_RENDER_VERSION,
         "detector_world_3d_sha256": file_sha256(world_path),
         "rig_2d_sha256": file_sha256(rig_path) if rig_path is not None else None,
         "smoothing_window": int(smoothing_window),

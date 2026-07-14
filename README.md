@@ -285,7 +285,9 @@ This writes `detector-baseline-motion.npz`,
 `detector-baseline-manifest.json`, and `preview-detector-baseline.mp4`. Short
 world-landmark gaps are interpolated under the same fail-closed gap limit,
 confidence-weighted temporal smoothing is applied, and the result is retargeted
-to the repository's neutral skeleton. This is a local-pose baseline: root
+to the repository's neutral skeleton. The preview uses the same solid procedural
+3D avatar as learned inference, making joint flips and implausible articulation
+easier to see than on a stick skeleton. This is a local-pose baseline: root
 translation is intentionally stationary until a learned world-grounding model
 predicts it.
 
@@ -314,8 +316,10 @@ video hash must match the rig provenance. The 3D stage adds:
 
 - `motion.npz` contains rotations, FK joints, root translation, contacts, FPS,
   topology, and provenance;
-- `preview-motion.mp4` places the 2D input beside the neutral 3D skeleton in
-  the predicted camera frame;
+- `preview-motion.mp4` places the 2D input beside a depth-sorted procedural 3D
+  avatar in the predicted camera frame. The avatar uses tapered limbs, a solid
+  torso, head, hands, feet, and distinct left/right colours, but remains the
+  same neutral 22-joint rig with no SMPL/SMPL-X asset;
 - `motion-manifest.json` carries the complete rig/source/model and checkpoint
   provenance.
 

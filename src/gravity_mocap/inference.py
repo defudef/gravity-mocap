@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from .artifacts import write_json_atomic, write_npz_atomic
+from .avatar import AVATAR_RENDER_VERSION, render_avatar_panel
 from .checkpoint import CHECKPOINT_VERSION
 from .model import GravityViewMotionModel
 from .projection import camera_space_joints
@@ -133,6 +134,8 @@ def _render_motion_preview(
     joints_3d: np.ndarray,
     output: Path,
     fps: float,
+    *,
+    nearer_positive: bool = True,
 ) -> None:
     cv2, _, _ = _video_dependencies()
     first_frame = next(_sampled_frames(video, indices[:1]))[2]
@@ -164,33 +167,15 @@ def _render_motion_preview(
                     2,
                     cv2.LINE_AA,
                 )
-            panel = np.full((source_height, panel_width, 3), 24, dtype=np.uint8)
             pose = joints_3d[output_index]
-            projected = np.empty((len(pose), 2), dtype=np.float32)
-            projected[:, 0] = center[0] + pose[:, 0] * scale
-            projected[:, 1] = center[1] - pose[:, 1] * scale
-            for joint, parent in enumerate(SKELETON.parents):
-                if parent < 0:
-                    continue
-                cv2.line(
-                    panel,
-                    tuple(projected[int(parent)].round().astype(int)),
-                    tuple(projected[joint].round().astype(int)),
-                    (50, 220, 255),
-                    3,
-                    cv2.LINE_AA,
-                )
-            for x, y in projected:
-                cv2.circle(panel, (round(float(x)), round(float(y))), 4, (255, 180, 80), -1)
-            cv2.putText(
-                panel,
-                "Gravity Mocap 3D",
-                (20, 35),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.8,
-                (235, 235, 235),
-                2,
-                cv2.LINE_AA,
+            panel = render_avatar_panel(
+                cv2,
+                pose,
+                width=panel_width,
+                height=source_height,
+                scale=scale,
+                center=center,
+                nearer_positive=nearer_positive,
             )
             writer.write(np.concatenate((frame, panel), axis=1))
     finally:
@@ -260,6 +245,7 @@ def infer_rig(
     rig_digest = file_sha256(rig_2d_path)
     request = {
         "inference_version": INFERENCE_VERSION,
+        "avatar_render_version": AVATAR_RENDER_VERSION,
         "rig_2d_sha256": rig_digest,
         "rig_2d_request_hash": rig.provenance.get("request_hash"),
         "detector_world_3d_sha256": (
@@ -367,6 +353,7 @@ def infer_rig(
             arrays["joints_camera"],
             preview_path,
             fps,
+            nearer_positive=False,
         )
     write_json_atomic(
         manifest_path,
