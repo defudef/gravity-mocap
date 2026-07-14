@@ -83,12 +83,24 @@ def load_config(path: Path) -> dict[str, Any]:
     if not 0 <= float(detector_world_3d["joint_dropout_probability"]) <= 1:
         raise ValueError("data.detector_world_3d.joint_dropout_probability must be in [0, 1]")
     model_uses_world_3d = bool(config["model"].get("use_detector_world_3d", False))
+    model_config = config["model"]
+    model_config.setdefault("pose_representation", "rotations")
+    model_config.setdefault("max_detector_residual_meters", 0.12)
+    model_config.setdefault("residual_confidence_floor", 0.25)
+    if model_config["pose_representation"] not in {"rotations", "detector_residual"}:
+        raise ValueError("model.pose_representation must be rotations or detector_residual")
+    if float(model_config["max_detector_residual_meters"]) <= 0:
+        raise ValueError("model.max_detector_residual_meters must be positive")
+    if not 0 <= float(model_config["residual_confidence_floor"]) <= 1:
+        raise ValueError("model.residual_confidence_floor must be in [0, 1]")
     if model_uses_world_3d != bool(detector_world_3d["enabled"]):
         raise ValueError(
             "model.use_detector_world_3d and data.detector_world_3d.enabled must match"
         )
     if model_uses_world_3d and not bool(data_config["gravity_view_contract"]):
         raise ValueError("detector world 3D requires data.gravity_view_contract: true")
+    if model_config["pose_representation"] == "detector_residual" and not model_uses_world_3d:
+        raise ValueError("detector_residual pose requires detector world 3D")
     augmentation = data_config.setdefault("augmentation", {"enabled": False})
     augmentation.setdefault("enabled", False)
     probability_names = (

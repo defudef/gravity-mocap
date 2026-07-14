@@ -23,11 +23,14 @@ def compute_losses(
 ) -> dict[str, Tensor]:
     mask = target["frame_mask"]
     losses: dict[str, Tensor] = {}
-    predicted_rotation_matrices = rotation_6d_to_matrix(prediction["local_rotations_6d"])
-    target_rotation_matrices = rotation_6d_to_matrix(target["local_rotations_6d"])
-    losses["rotations"] = _masked_mean(
-        (predicted_rotation_matrices - target_rotation_matrices).square(), mask
-    )
+    if "local_rotations_6d" in prediction:
+        predicted_rotation_matrices = rotation_6d_to_matrix(prediction["local_rotations_6d"])
+        target_rotation_matrices = rotation_6d_to_matrix(target["local_rotations_6d"])
+        losses["rotations"] = _masked_mean(
+            (predicted_rotation_matrices - target_rotation_matrices).square(), mask
+        )
+    else:
+        losses["rotations"] = prediction["joints_3d"].new_zeros(())
     losses["root_velocity"] = _masked_mean(
         (prediction["root_velocity_local"] - target["root_velocity_local"]).square(), mask
     )
@@ -40,17 +43,31 @@ def compute_losses(
     losses["weak_camera"] = _masked_mean(
         (prediction["weak_camera"] - target["weak_camera"]).square(), mask
     )
+    positive_weight = prediction["contacts"].new_tensor(
+        float(weights.get("contacts_positive_weight", 1.0))
+    )
     contact_bce = F.binary_cross_entropy_with_logits(
-        prediction["contacts"], target["contacts"], reduction="none"
+        prediction["contacts"],
+        target["contacts"],
+        reduction="none",
+        pos_weight=positive_weight,
     )
     losses["contacts"] = _masked_mean(contact_bce, mask)
 
-    rotations = predicted_rotation_matrices
-    root = torch.zeros_like(prediction["root_velocity_local"])
-    offsets = torch.as_tensor(REST_OFFSETS, device=rotations.device, dtype=rotations.dtype)
-    parents = torch.as_tensor(PARENTS, device=rotations.device)
-    predicted_joints = forward_kinematics(rotations, root, offsets, parents)
+    if "joints_3d" in prediction:
+        predicted_joints = prediction["joints_3d"]
+    else:
+        rotations = predicted_rotation_matrices
+        root = torch.zeros_like(prediction["root_velocity_local"])
+        offsets = torch.as_tensor(REST_OFFSETS, device=rotations.device, dtype=rotations.dtype)
+        parents = torch.as_tensor(PARENTS, device=rotations.device)
+        predicted_joints = forward_kinematics(rotations, root, offsets, parents)
     losses["joints_3d"] = _masked_mean((predicted_joints - target["joints_3d"]).square(), mask)
+    if "detector_residual_3d" in prediction:
+        confidence = target["detector_3d_confidence"] * mask.unsqueeze(-1)
+        losses["detector_residual"] = _masked_mean(
+            prediction["detector_residual_3d"].square(), confidence
+        )
 
     reprojection_bbox = target.get("bbox_target", target["bbox"])
     projected = project_motion_to_frame(prediction, predicted_joints)

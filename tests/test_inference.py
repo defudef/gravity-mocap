@@ -17,7 +17,12 @@ from gravity_mocap.world3d import (
 )
 
 
-def _checkpoint(path: Path, *, use_detector_world_3d: bool = False) -> None:
+def _checkpoint(
+    path: Path,
+    *,
+    use_detector_world_3d: bool = False,
+    pose_representation: str = "rotations",
+) -> None:
     model_config = {
         "joints": 22,
         "image_feature_dim": 8,
@@ -28,6 +33,9 @@ def _checkpoint(path: Path, *, use_detector_world_3d: bool = False) -> None:
         "dropout": 0.0,
         "attention_radius": 8,
         "use_detector_world_3d": use_detector_world_3d,
+        "pose_representation": pose_representation,
+        "max_detector_residual_meters": 0.12,
+        "residual_confidence_floor": 0.25,
     }
     model = GravityViewMotionModel(**model_config)
     torch.save(
@@ -194,3 +202,30 @@ def test_v2_inference_requires_and_uses_detector_world_3d(tmp_path: Path) -> Non
     with np.load(result["motion"], allow_pickle=False) as archive:
         provenance = json.loads(str(archive["provenance_json"]))
     assert provenance["detector_world_3d"] == str(world)
+
+
+def test_residual_inference_preserves_safe_detector_identity_path(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "best.pt"
+    rig = tmp_path / "rig-2d.npz"
+    world = tmp_path / "detector-world-3d.npz"
+    _checkpoint(
+        checkpoint,
+        use_detector_world_3d=True,
+        pose_representation="detector_residual",
+    )
+    _detector_inputs(rig)
+    _detector_world_3d(world)
+
+    result = infer_rig(
+        rig,
+        checkpoint,
+        tmp_path / "output",
+        detector_world_3d_path=world,
+        device_name="cpu",
+        preview=False,
+    )
+
+    with np.load(result["motion"], allow_pickle=False) as archive:
+        assert np.max(np.abs(archive["detector_residual_3d"])) == 0
+        assert archive["model_joints_3d"].shape == (11, SKELETON.joint_count, 3)
+        assert np.isfinite(archive["local_rotation_matrices"]).all()

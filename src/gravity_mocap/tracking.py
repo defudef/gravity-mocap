@@ -198,6 +198,15 @@ class ProgressLogger:
                 5,
                 f"MPJPE_gain={metrics['mpjpe_gain_vs_detector_m'] * 100:+.2f}cm",
             )
+        if "detector_neutral_mpjpe_m" in metrics:
+            parts.insert(
+                5,
+                f"neutral_prior={metrics['detector_neutral_mpjpe_m'] * 100:.2f}cm",
+            )
+            parts.insert(
+                7,
+                f"neutral_gain={metrics['mpjpe_gain_vs_detector_neutral_m'] * 100:+.2f}cm",
+            )
         if best_loss is not None:
             parts.append(f"best={best_loss:.6f}")
         if improved:

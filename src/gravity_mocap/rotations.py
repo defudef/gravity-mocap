@@ -4,6 +4,8 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
+from .skeleton import PARENTS, REST_OFFSETS
+
 
 def rotation_6d_to_matrix(value: Tensor) -> Tensor:
     """Convert the continuous 6D representation to a 3x3 rotation matrix."""
@@ -23,6 +25,34 @@ def identity_rotation_6d(*shape: int, device: torch.device | str | None = None) 
     value[..., 0] = 1.0
     value[..., 4] = 1.0
     return value
+
+
+def retarget_joints_to_neutral_skeleton(joints: Tensor) -> Tensor:
+    """Preserve observed global bone directions while enforcing neutral bone lengths.
+
+    The operation is differentiable and keeps the detector pose as an identity
+    path for residual models. Degenerate observed bones fall back to their
+    neutral rest direction instead of producing NaN values.
+    """
+    if joints.ndim < 3 or joints.shape[-2:] != (len(PARENTS), 3):
+        raise ValueError(
+            f"Expected detector joints ending in ({len(PARENTS)}, 3), got {joints.shape}"
+        )
+    positions: list[Tensor] = [torch.zeros_like(joints[..., 0, :])]
+    offsets = torch.as_tensor(REST_OFFSETS, dtype=joints.dtype, device=joints.device)
+    for joint, parent_value in enumerate(PARENTS):
+        parent = int(parent_value)
+        if parent < 0:
+            continue
+        observed = joints[..., joint, :] - joints[..., parent, :]
+        observed_length = torch.linalg.vector_norm(observed, dim=-1, keepdim=True)
+        rest = offsets[joint]
+        rest_length = torch.linalg.vector_norm(rest)
+        fallback = rest / rest_length.clamp_min(1e-8)
+        direction = observed / observed_length.clamp_min(1e-8)
+        direction = torch.where(observed_length > 1e-6, direction, fallback)
+        positions.append(positions[parent] + direction * rest_length)
+    return torch.stack(positions, dim=-2)
 
 
 def forward_kinematics(

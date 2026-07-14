@@ -3,7 +3,11 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
-from .rotations import forward_kinematics, rotation_6d_to_matrix
+from .rotations import (
+    forward_kinematics,
+    retarget_joints_to_neutral_skeleton,
+    rotation_6d_to_matrix,
+)
 from .skeleton import PARENTS, REST_OFFSETS
 
 
@@ -19,11 +23,14 @@ def compute_motion_metrics(
 ) -> dict[str, Tensor]:
     """Metrics for held-out, sequence-disjoint validation windows."""
     frame_mask = target["frame_mask"]
-    rotations = rotation_6d_to_matrix(prediction["local_rotations_6d"])
-    root = torch.zeros_like(prediction["root_velocity_local"])
-    offsets = torch.as_tensor(REST_OFFSETS, device=rotations.device, dtype=rotations.dtype)
-    parents = torch.as_tensor(PARENTS, device=rotations.device)
-    predicted_joints = forward_kinematics(rotations, root, offsets, parents)
+    if "joints_3d" in prediction:
+        predicted_joints = prediction["joints_3d"]
+    else:
+        rotations = rotation_6d_to_matrix(prediction["local_rotations_6d"])
+        root = torch.zeros_like(prediction["root_velocity_local"])
+        offsets = torch.as_tensor(REST_OFFSETS, device=rotations.device, dtype=rotations.dtype)
+        parents = torch.as_tensor(PARENTS, device=rotations.device)
+        predicted_joints = forward_kinematics(rotations, root, offsets, parents)
 
     joint_error = torch.linalg.vector_norm(predicted_joints - target["joints_3d"], dim=-1)
     velocity_error = torch.linalg.vector_norm(
@@ -48,13 +55,20 @@ def compute_motion_metrics(
             frame_mask.dtype
         )
         detector_mpjpe = _masked_mean(detector_error, detector_mask)
+        detector_neutral = retarget_joints_to_neutral_skeleton(target["detector_joints_3d"])
+        detector_neutral_error = torch.linalg.vector_norm(
+            detector_neutral - target["joints_3d"], dim=-1
+        )
+        detector_neutral_mpjpe = _masked_mean(detector_neutral_error, detector_mask)
         metrics["detector_prior_mpjpe_m"] = detector_mpjpe
+        metrics["detector_neutral_mpjpe_m"] = detector_neutral_mpjpe
         metrics["detector_prior_coverage"] = _masked_mean(
             (target["detector_3d_confidence"] > 0).to(frame_mask.dtype),
             frame_mask,
         )
         # Positive means the learned output beats the detector prior.
         metrics["mpjpe_gain_vs_detector_m"] = detector_mpjpe - metrics["mpjpe_m"]
+        metrics["mpjpe_gain_vs_detector_neutral_m"] = detector_neutral_mpjpe - metrics["mpjpe_m"]
 
     if predicted_joints.shape[1] >= 3:
         predicted_acceleration = (

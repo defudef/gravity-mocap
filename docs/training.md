@@ -184,8 +184,24 @@ configuration at the paper model's output because their checkpoints are
 intentionally incompatible.
 
 Version-4 `motion-small/` checkpoints remain isolated and cannot resume into
-the Gravity-View/detector-prior v5 job. Use `scripts/train-v2-canary.sh` for an
-isolated three-epoch dry-run/execute canary before starting the full v2 output.
+the Gravity-View/detector-prior v5 job. Its three-epoch canary improved MPJPE
+from 15.32 cm to 10.87 cm, but the raw detector prior was already 4.31 cm and
+contact F1 ended at zero. Do not extend that run.
+
+The recommended successor is the checkpoint-v6 detector-safe residual model.
+It enforces neutral bone lengths, starts with an exact zero correction to the
+neutralized detector pose, and bounds learned corrections by detector
+confidence. Preview and execute its isolated canary with:
+
+```sh
+./scripts/train-residual-canary.sh
+./scripts/train-residual-canary.sh --execute
+```
+
+Use `scripts/train-residual-small.sh` for a fresh production output and later
+resumes. It writes below `runs/motion-small-v3-residual`; never point it at a v5
+output. A run may continue only when held-out `neutral_gain` becomes positive,
+not merely because the aggregate loss decreases.
 
 The capacity calculation is in `docs/model-capacity.md`. In short, current
 `core` yields roughly 53--54 thousand 4-second training windows after the 5%
