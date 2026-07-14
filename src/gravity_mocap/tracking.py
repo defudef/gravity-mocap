@@ -163,6 +163,15 @@ class ProgressLogger:
         loss = "?" if validation_loss is None else f"{validation_loss:.6f}"
         self._write(f"[checkpoint] best={path} | epoch={epoch} | val_loss={loss}")
 
+    def best_pose_checkpoint(
+        self,
+        path: Path,
+        *,
+        epoch: int,
+        mpjpe_m: float,
+    ) -> None:
+        self._write(f"[checkpoint] best_pose={path} | epoch={epoch} | MPJPE={mpjpe_m * 100:.2f}cm")
+
     def validation_start(self, *, epoch: int, epochs: int, windows: int) -> None:
         self._write(f"[validation] START | epoch {epoch}/{epochs} | windows={windows:,}")
 

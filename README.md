@@ -426,7 +426,7 @@ and may also replace `keypoints_2d` and `bbox`.
 
 The first detector-conditioned v5 canary reduced its own validation loss but
 regressed pose from the 4.31 cm raw detector prior to 10.87 cm MPJPE and kept
-contact F1 at zero. Do not extend that run. The v6 residual model instead keeps
+contact F1 at zero. Do not extend that run. The v7 residual model instead keeps
 the neutralized detector pose as an exact identity path and predicts only a
 bounded, confidence-gated 3D correction. Root motion, camera, and contacts stay
 separate heads. Its untrained pose starts at the neutral detector baseline
@@ -447,10 +447,13 @@ For a longer fresh run or a later resume use the production residual output:
 ./scripts/train-residual-small.sh --execute --max-epochs 10
 ```
 
-The residual checkpoint contract is version 6 and uses isolated
+The residual checkpoint contract is version 7 and uses isolated
 `motion-small-v3-residual*` outputs. It cannot resume v5 or older checkpoints.
 Validation reports both raw and neutralized detector MPJPE; positive
-`neutral_gain` is the required pose-quality gate.
+`neutral_gain` is the required pose-quality gate. The lowest-MPJPE checkpoint
+is preserved separately as `best-pose.pt`; `best.pt` continues to track the
+aggregate validation objective. Root velocity starts at stationary, is bounded
+to the audited motion range, and contact BCE uses per-class corpus balance.
 
 ### Smaller 11.7M-parameter v2 baseline
 

@@ -208,6 +208,11 @@ def test_detector_residual_pose_starts_as_safe_neutral_prior(tmp_path: Path) -> 
     assert "local_rotations_6d" not in prediction
     assert torch.equal(prediction["detector_residual_3d"], torch.zeros_like(expected))
     assert torch.allclose(prediction["joints_3d"], expected, atol=1e-6)
+    assert torch.equal(
+        prediction["root_velocity_local"],
+        torch.zeros_like(prediction["root_velocity_local"]),
+    )
+    assert torch.equal(prediction["contacts"], torch.zeros_like(prediction["contacts"]))
     bone_lengths = torch.linalg.vector_norm(
         prediction["joints_3d"][..., 1:, :] - prediction["joints_3d"][..., SKELETON.parents[1:], :],
         dim=-1,
@@ -231,6 +236,7 @@ def test_detector_residual_is_bounded_by_confidence() -> None:
         residual_confidence_floor=0.25,
     ).eval()
     model.heads["detector_residual_3d"].bias.data.fill_(10.0)
+    model.heads["root_velocity_local"].bias.data.fill_(100.0)
     batch = {
         "bbox": torch.zeros(1, 2, 4),
         "keypoints_2d": torch.zeros(1, 2, 22, 3),
@@ -244,8 +250,11 @@ def test_detector_residual_is_bounded_by_confidence() -> None:
     }
 
     with torch.no_grad():
-        residual = model(batch)["detector_residual_3d"]
+        prediction = model(batch)
+        residual = prediction["detector_residual_3d"]
 
     assert residual[0, 0, 1, 0] == pytest.approx(0.03, abs=1e-5)
     assert residual[0, 1, 1, 0] == pytest.approx(0.12, abs=1e-5)
     assert torch.equal(residual[..., 0, :], torch.zeros_like(residual[..., 0, :]))
+    speed = torch.linalg.vector_norm(prediction["root_velocity_local"], dim=-1)
+    assert torch.all(speed <= 5.0 + 1e-5)

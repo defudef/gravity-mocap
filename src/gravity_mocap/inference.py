@@ -25,7 +25,7 @@ from .skeleton import SKELETON
 from .video import _sampled_frames, _video_dependencies, file_sha256
 from .world3d import load_detector_world_3d, prepare_detector_world_3d
 
-INFERENCE_VERSION = 3
+INFERENCE_VERSION = 4
 
 
 def resolve_device(name: str) -> torch.device:
@@ -373,7 +373,7 @@ def infer_rig(
             preview_path,
             fps,
             nearer_positive=True,
-            avatar_title="B - detector-safe residual v6",
+            avatar_title="B - detector-safe residual v7",
         )
     write_json_atomic(
         manifest_path,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 import torch
 from torch import Tensor
 from torch.nn import functional as F
@@ -19,7 +21,7 @@ def _masked_mean(value: Tensor, mask: Tensor) -> Tensor:
 def compute_losses(
     prediction: dict[str, Tensor],
     target: dict[str, Tensor],
-    weights: dict[str, float],
+    weights: dict[str, Any],
 ) -> dict[str, Tensor]:
     mask = target["frame_mask"]
     losses: dict[str, Tensor] = {}
@@ -44,7 +46,7 @@ def compute_losses(
         (prediction["weak_camera"] - target["weak_camera"]).square(), mask
     )
     positive_weight = prediction["contacts"].new_tensor(
-        float(weights.get("contacts_positive_weight", 1.0))
+        weights.get("contacts_positive_weight", 1.0)
     )
     contact_bce = F.binary_cross_entropy_with_logits(
         prediction["contacts"],

@@ -115,6 +115,7 @@ class GravityViewMotionModel(nn.Module):
         pose_representation: str = "rotations",
         max_detector_residual_meters: float = 0.12,
         residual_confidence_floor: float = 0.25,
+        max_root_speed_mps: float = 5.0,
     ):
         super().__init__()
         if pose_representation not in {"rotations", "detector_residual"}:
@@ -125,11 +126,14 @@ class GravityViewMotionModel(nn.Module):
             raise ValueError("max_detector_residual_meters must be positive")
         if not 0 <= residual_confidence_floor <= 1:
             raise ValueError("residual_confidence_floor must be in [0, 1]")
+        if max_root_speed_mps <= 0:
+            raise ValueError("max_root_speed_mps must be positive")
         self.joints = joints
         self.use_detector_world_3d = bool(use_detector_world_3d)
         self.pose_representation = pose_representation
         self.max_detector_residual_meters = float(max_detector_residual_meters)
         self.residual_confidence_floor = float(residual_confidence_floor)
+        self.max_root_speed_mps = float(max_root_speed_mps)
         self.modalities = nn.ModuleDict(
             {
                 "bbox": ModalityMLP(4, hidden_dim),
@@ -166,6 +170,10 @@ class GravityViewMotionModel(nn.Module):
         if self.pose_representation == "detector_residual":
             nn.init.zeros_(self.heads["detector_residual_3d"].weight)
             nn.init.zeros_(self.heads["detector_residual_3d"].bias)
+            nn.init.zeros_(self.heads["root_velocity_local"].weight)
+            nn.init.zeros_(self.heads["root_velocity_local"].bias)
+            nn.init.zeros_(self.heads["contacts"].weight)
+            nn.init.zeros_(self.heads["contacts"].bias)
 
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         tokens = self.modalities["bbox"](batch["bbox"])
@@ -206,6 +214,16 @@ class GravityViewMotionModel(nn.Module):
             detector_pose = retarget_joints_to_neutral_skeleton(batch["detector_joints_3d"])
             outputs["detector_residual_3d"] = residual
             outputs["joints_3d"] = retarget_joints_to_neutral_skeleton(detector_pose + residual)
+            raw_velocity = outputs["root_velocity_local"]
+            speed = torch.linalg.vector_norm(raw_velocity, dim=-1, keepdim=True)
+            bounded_scale = torch.where(
+                speed > 1e-6,
+                self.max_root_speed_mps
+                * torch.tanh(speed / self.max_root_speed_mps)
+                / speed.clamp_min(1e-6),
+                torch.ones_like(speed),
+            )
+            outputs["root_velocity_local"] = raw_velocity * bounded_scale
         return outputs
 
     @property

@@ -188,7 +188,7 @@ the Gravity-View/detector-prior v5 job. Its three-epoch canary improved MPJPE
 from 15.32 cm to 10.87 cm, but the raw detector prior was already 4.31 cm and
 contact F1 ended at zero. Do not extend that run.
 
-The recommended successor is the checkpoint-v6 detector-safe residual model.
+The recommended successor is the checkpoint-v7 detector-safe residual model.
 It enforces neutral bone lengths, starts with an exact zero correction to the
 neutralized detector pose, and bounds learned corrections by detector
 confidence. Preview and execute its isolated canary with:
@@ -201,7 +201,10 @@ confidence. Preview and execute its isolated canary with:
 Use `scripts/train-residual-small.sh` for a fresh production output and later
 resumes. It writes below `runs/motion-small-v3-residual`; never point it at a v5
 output. A run may continue only when held-out `neutral_gain` becomes positive,
-not merely because the aggregate loss decreases.
+not merely because the aggregate loss decreases. `best-pose.pt` tracks minimum
+held-out MPJPE independently from the aggregate-loss `best.pt`. The root head
+starts from a stationary path and is speed-bounded; contact loss uses the six
+class frequencies measured from the approved training corpus.
 
 The capacity calculation is in `docs/model-capacity.md`. In short, current
 `core` yields roughly 53--54 thousand 4-second training windows after the 5%
