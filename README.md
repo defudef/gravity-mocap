@@ -210,14 +210,14 @@ in the same train/validation group, so the split cannot leak neighboring trials
 from one source file. Changing that temporal contract or the synthetic-camera
 configuration invalidates old shards and checkpoints by design.
 
-## External 2D detector contract
+## Video -> neutral 2D rig
 
-### Video tutorial: MediaPipe 2D skeleton -> Gravity Mocap 3D
-
-The optional local video frontend uses the checksum-pinned MediaPipe Pose
-Landmarker Heavy bundle. It tracks one person, maps its 33 landmarks (including
-heels and toes) to the neutral 22-joint contract, and then runs the selected
-Gravity Mocap checkpoint. It does not use SMPL or SMPL-X.
+The video frontend is a first-class Gravity Mocap module, separate from the
+learned 2D-to-3D model. It uses the checksum-pinned MediaPipe Pose Landmarker
+Heavy bundle in VIDEO tracking mode, tracks one person, and maps its 33
+landmarks (including heels and toes) to the neutral 22-joint contract. The
+frontend, model checksum, provenance, cache, artifact schema, CLI, and tests all
+live in this repository. It has no dependency on `cozy-rpg`, SMPL, or SMPL-X.
 
 Install the optional video dependencies once:
 
@@ -225,28 +225,70 @@ Install the optional video dependencies once:
 ./scripts/setup-video.sh
 ```
 
-Run the complete pipeline on a video:
+Create only the standalone 2D rig:
+
+```sh
+./scripts/video.sh video-to-rig path/to/reference.mp4 --max-frames 90
+```
+
+This command stops after the deterministic frontend. It does not load a Gravity
+Mocap checkpoint or run 3D inference. `detect-video` remains an alias for
+backward compatibility.
+
+The API boundary is equally explicit:
+
+```python
+from pathlib import Path
+
+from gravity_mocap.rig2d import load_rig_2d
+from gravity_mocap.video import video_to_rig
+
+result = video_to_rig(video, output_dir, data_root=data_root)
+rig = load_rig_2d(Path(result["rig_2d"]))
+```
+
+By default, the content-addressed output directory is
+`Saved/GravityMocap/inference/<video-stem>-<source-sha-prefix>/` and the 2D stage
+creates:
+
+- `rig-2d.npz`: the independently reusable 2D rig and model-ready normalized
+  inputs;
+- `rig-2d-manifest.json`: source bytes, detector model URL/size/SHA-256, mapping
+  version, parameters, frame selection, dimensions, FPS, and joint order;
+- `preview-rig-2d.mp4`: the detected neutral skeleton over the source video.
+
+The NPZ contains pixel-space keypoints for inspection and bbox-relative
+keypoints in `[-1, 1]` for the motion model. Its bbox is frame-relative
+`[-1, 1]`; missing joints have confidence and coordinates set to zero. The
+loader validates finite values and the exact neutral joint order and rejects
+any SMPL/SMPL-X/body-model fields.
+
+## Neutral 2D rig -> Gravity Mocap 3D
+
+Run 3D recovery from an already-created rig without rerunning the detector or
+requiring the source video:
+
+```sh
+./scripts/video.sh infer-rig \
+  Saved/GravityMocap/inference/<video-id>/rig-2d.npz \
+  --checkpoint Saved/GravityMocap/runs/motion-small/best.pt
+```
+
+Add `--source-video path/to/reference.mp4` to render `preview-motion.mp4`; the
+video hash must match the rig provenance. The 3D stage adds:
+
+- `motion.npz` contains rotations, FK joints, root translation, contacts, FPS,
+  topology, and provenance;
+- `preview-motion.mp4` places the 2D input beside a neutral 3D skeleton;
+- `motion-manifest.json` carries the complete rig/source/model and checkpoint
+  provenance.
+
+For convenience, the composed command still runs both stages:
 
 ```sh
 ./scripts/video.sh infer-video path/to/reference.mp4 \
   --checkpoint Saved/GravityMocap/runs/motion-small/best.pt
 ```
-
-For a quick detector-only check, process at most 90 output frames:
-
-```sh
-./scripts/video.sh detect-video path/to/reference.mp4 --max-frames 90
-```
-
-By default, results go to
-`Saved/GravityMocap/inference/<video-stem>-<source-sha-prefix>/`:
-
-- `detector-inputs.npz` contains normalized inputs plus pixel-space keypoints;
-- `preview-2d.mp4` overlays the detected skeleton on the source video;
-- `motion.npz` contains rotations, FK joints, root translation, contacts, FPS,
-  topology, and provenance;
-- `preview-motion.mp4` places the 2D input beside a neutral 3D skeleton;
-- both JSON manifests record source/model/checkpoint hashes and all parameters.
 
 The operation is idempotent: unchanged source bytes, model, checkpoint, and
 arguments reuse the existing artifacts. `--force` rebuilds them. `--no-preview`
@@ -258,7 +300,7 @@ motion-only checkpoint.
 
 MediaPipe tracking improves temporal stability but still assumes one principal
 person. Long detector gaps fail closed instead of silently inventing a track;
-adjust `--max-missing-frames` only after checking `preview-2d.mp4`. A clean 2D
+adjust `--max-missing-frames` only after checking `preview-rig-2d.mp4`. A clean 2D
 preview does not guarantee a good 3D result: that also depends on the capacity
 and training state of the chosen Gravity Mocap checkpoint.
 

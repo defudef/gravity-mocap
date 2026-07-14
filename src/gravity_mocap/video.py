@@ -11,8 +11,18 @@ from typing import Any
 
 import numpy as np
 
+from .artifacts import write_json_atomic
 from .detector import normalize_detector_inputs
 from .pose import fill_short_bbox_gaps, mediapipe_to_canonical, padded_bbox_from_landmarks
+from .rig2d import (
+    RIG_2D_FILENAME,
+    RIG_2D_MANIFEST_FILENAME,
+    RIG_2D_PREVIEW_FILENAME,
+    RIG_2D_VERSION,
+    Rig2D,
+    load_rig_2d,
+    write_rig_2d,
+)
 from .rotations import identity_rotation_6d
 from .schema import stable_hash
 from .skeleton import SKELETON
@@ -25,7 +35,6 @@ POSE_MODEL_URL = (
 POSE_MODEL_FILENAME = "pose_landmarker_heavy.task"
 POSE_MODEL_SIZE = 30_664_242
 POSE_MODEL_SHA256 = "64437af838a65d18e5ba7a0d39b465540069bc8aae8308de3e318aad31fcbc7b"
-VIDEO_INPUT_VERSION = 1
 
 
 def file_sha256(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
@@ -150,24 +159,14 @@ def _sampled_frames(video: Path, indices: np.ndarray) -> Iterator[tuple[int, int
         capture.release()
 
 
-def default_inference_directory(video: Path, data_root: Path) -> Path:
+def default_video_output_directory(video: Path, data_root: Path) -> Path:
     source_digest = file_sha256(video)
     return data_root / "inference" / f"{video.stem}-{source_digest[:12]}"
 
 
-def _write_npz_atomic(path: Path, **arrays: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("wb") as handle:
-        np.savez_compressed(handle, **arrays)
-    os.replace(temporary, path)
-
-
-def _write_json_atomic(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    os.replace(temporary, path)
+def default_inference_directory(video: Path, data_root: Path) -> Path:
+    """Backward-compatible name for the content-addressed video output directory."""
+    return default_video_output_directory(video, data_root)
 
 
 def _render_pose_preview(
@@ -204,7 +203,7 @@ def _render_pose_preview(
     os.replace(temporary, output)
 
 
-def detect_video(
+def video_to_rig(
     video: Path,
     output_dir: Path,
     *,
@@ -217,7 +216,7 @@ def detect_video(
     force: bool = False,
     preview: bool = True,
 ) -> dict[str, Any]:
-    """Run MediaPipe Heavy and save the neutral detector-input contract."""
+    """Run MediaPipe Heavy and save a standalone neutral 2D rig artifact."""
     video = video.expanduser().resolve()
     if not video.is_file():
         raise ValueError(f"Video does not exist: {video}")
@@ -235,7 +234,7 @@ def detect_video(
     )
     source_digest = file_sha256(video)
     request = {
-        "input_version": VIDEO_INPUT_VERSION,
+        "rig_2d_version": RIG_2D_VERSION,
         "source_sha256": source_digest,
         "backend": POSE_BACKEND,
         "model_sha256": POSE_MODEL_SHA256,
@@ -247,23 +246,25 @@ def detect_video(
     }
     request_hash = stable_hash(request)
     output_dir = output_dir.expanduser().resolve()
-    inputs_path = output_dir / "detector-inputs.npz"
-    manifest_path = output_dir / "detector-manifest.json"
-    preview_path = output_dir / "preview-2d.mp4"
-    if not force and inputs_path.is_file() and manifest_path.is_file():
+    rig_path = output_dir / RIG_2D_FILENAME
+    manifest_path = output_dir / RIG_2D_MANIFEST_FILENAME
+    preview_path = output_dir / RIG_2D_PREVIEW_FILENAME
+    if not force and rig_path.is_file() and manifest_path.is_file():
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             if manifest.get("request_hash") == request_hash and (
                 not preview or preview_path.is_file()
             ):
+                cached_rig = load_rig_2d(rig_path)
                 return {
                     "status": "cached",
-                    "frames": int(manifest["frames"]),
-                    "detector_inputs": str(inputs_path),
+                    "frames": cached_rig.frames,
+                    "rig_2d": str(rig_path),
+                    "detector_inputs": str(rig_path),
                     "manifest": str(manifest_path),
                     "preview": str(preview_path) if preview_path.is_file() else None,
                 }
-        except (json.JSONDecodeError, KeyError, OSError):
+        except (json.JSONDecodeError, KeyError, OSError, ValueError):
             pass
 
     cv2, mp, vision = _video_dependencies()
@@ -321,9 +322,9 @@ def detect_video(
         normalized_keypoints[index], normalized_bboxes[index] = normalize_detector_inputs(
             points, bbox, frame_width=width, frame_height=height
         )
-    image_feature_dim = 512
     provenance = {
         **request,
+        "artifact_type": "gravity-mocap-rig-2d",
         "request_hash": request_hash,
         "source_path": str(video),
         "source_fps": source_fps,
@@ -337,23 +338,23 @@ def detect_video(
         "model_size": POSE_MODEL_SIZE,
         "license": "Apache-2.0",
     }
-    _write_npz_atomic(
-        inputs_path,
-        keypoints_2d=normalized_keypoints,
-        bbox=normalized_bboxes,
-        camera_delta_6d=identity_rotation_6d(len(indices)).cpu().numpy(),
-        image_features=np.zeros((len(indices), image_feature_dim), dtype=np.float32),
-        image_mask=np.zeros(len(indices), dtype=np.float32),
-        frame_mask=np.ones(len(indices), dtype=np.float32),
-        pixel_keypoints=keypoints,
-        pixel_bbox=bboxes,
-        source_frame_indices=indices,
-        fps=np.asarray(target_fps, dtype=np.float32),
-        source_fps=np.asarray(source_fps, dtype=np.float32),
-        frame_width=np.asarray(width, dtype=np.int32),
-        frame_height=np.asarray(height, dtype=np.int32),
-        joint_names=np.asarray(SKELETON.names),
-        provenance_json=np.asarray(json.dumps(provenance, sort_keys=True)),
+    write_rig_2d(
+        rig_path,
+        Rig2D(
+            keypoints_2d=normalized_keypoints,
+            bbox=normalized_bboxes,
+            camera_delta_6d=identity_rotation_6d(len(indices)).cpu().numpy(),
+            image_mask=np.zeros(len(indices), dtype=np.float32),
+            frame_mask=np.ones(len(indices), dtype=np.float32),
+            pixel_keypoints=keypoints,
+            pixel_bbox=bboxes,
+            source_frame_indices=indices,
+            fps=target_fps,
+            source_fps=source_fps,
+            frame_width=width,
+            frame_height=height,
+            provenance=provenance,
+        ),
     )
     if preview:
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -361,15 +362,45 @@ def detect_video(
     manifest = {
         **provenance,
         "frames": len(indices),
-        "detector_inputs": str(inputs_path),
+        "rig_2d": str(rig_path),
+        "detector_inputs": str(rig_path),
         "preview": str(preview_path) if preview else None,
     }
-    _write_json_atomic(manifest_path, manifest)
+    write_json_atomic(manifest_path, manifest)
     return {
         "status": "created",
         "frames": len(indices),
         "detected_frames": detected_frames,
-        "detector_inputs": str(inputs_path),
+        "rig_2d": str(rig_path),
+        "detector_inputs": str(rig_path),
         "manifest": str(manifest_path),
         "preview": str(preview_path) if preview else None,
     }
+
+
+def detect_video(
+    video: Path,
+    output_dir: Path,
+    *,
+    data_root: Path,
+    target_fps: float = 30.0,
+    confidence_threshold: float = 0.2,
+    bbox_padding: float = 0.12,
+    max_missing_frames: int = 30,
+    max_frames: int | None = None,
+    force: bool = False,
+    preview: bool = True,
+) -> dict[str, Any]:
+    """Backward-compatible alias for :func:`video_to_rig`."""
+    return video_to_rig(
+        video,
+        output_dir,
+        data_root=data_root,
+        target_fps=target_fps,
+        confidence_threshold=confidence_threshold,
+        bbox_padding=bbox_padding,
+        max_missing_frames=max_missing_frames,
+        max_frames=max_frames,
+        force=force,
+        preview=preview,
+    )

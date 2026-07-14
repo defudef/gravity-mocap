@@ -8,8 +8,10 @@ from typing import Any
 import numpy as np
 import torch
 
+from .artifacts import write_json_atomic, write_npz_atomic
 from .checkpoint import CHECKPOINT_VERSION
 from .model import GravityViewMotionModel
+from .rig2d import load_rig_2d
 from .rotations import (
     forward_kinematics,
     integrate_root_velocity,
@@ -18,7 +20,7 @@ from .rotations import (
 )
 from .schema import stable_hash
 from .skeleton import SKELETON
-from .video import _sampled_frames, _video_dependencies, _write_json_atomic, _write_npz_atomic
+from .video import _sampled_frames, _video_dependencies, file_sha256
 
 INFERENCE_VERSION = 1
 
@@ -67,47 +69,6 @@ def window_starts(frame_count: int, sequence_length: int, stride: int) -> list[i
     if not starts or starts[-1] != final:
         starts.append(final)
     return starts
-
-
-def _load_detector_inputs(path: Path, image_feature_dim: int) -> dict[str, np.ndarray]:
-    required = (
-        "keypoints_2d",
-        "bbox",
-        "camera_delta_6d",
-        "image_mask",
-        "frame_mask",
-        "pixel_keypoints",
-        "pixel_bbox",
-        "source_frame_indices",
-        "fps",
-        "provenance_json",
-    )
-    with np.load(path, allow_pickle=False) as archive:
-        missing = [name for name in required if name not in archive]
-        if missing:
-            raise ValueError(f"Detector input is missing: {', '.join(missing)}")
-        arrays = {name: np.asarray(archive[name]) for name in required}
-    frames = len(arrays["frame_mask"])
-    expected_shapes = {
-        "keypoints_2d": (frames, SKELETON.joint_count, 3),
-        "bbox": (frames, 4),
-        "camera_delta_6d": (frames, 6),
-        "image_mask": (frames,),
-        "frame_mask": (frames,),
-        "pixel_keypoints": (frames, SKELETON.joint_count, 3),
-        "pixel_bbox": (frames, 4),
-        "source_frame_indices": (frames,),
-    }
-    for name, shape in expected_shapes.items():
-        if arrays[name].shape != shape:
-            raise ValueError(f"{name} has shape {arrays[name].shape}; expected {shape}")
-        if not np.isfinite(arrays[name]).all():
-            raise ValueError(f"{name} contains NaN or infinity")
-    if frames < 2:
-        raise ValueError("Inference requires at least two video frames")
-    arrays["image_features"] = np.zeros((frames, image_feature_dim), dtype=np.float32)
-    arrays["image_mask"] = np.zeros(frames, dtype=np.float32)
-    return arrays
 
 
 def _blend_predictions(
@@ -233,37 +194,44 @@ def _render_motion_preview(
     os.replace(temporary, output)
 
 
-def infer_motion(
-    detector_inputs: Path,
-    video: Path,
+def infer_rig(
+    rig_2d_path: Path,
     checkpoint_path: Path,
     output_dir: Path,
     *,
+    source_video: Path | None = None,
     device_name: str = "auto",
     force: bool = False,
-    preview: bool = True,
+    preview: bool = False,
 ) -> dict[str, Any]:
-    detector_inputs = detector_inputs.expanduser().resolve()
-    video = video.expanduser().resolve()
+    """Recover neutral 3D motion from a standalone 2D rig artifact."""
+    rig_2d_path = rig_2d_path.expanduser().resolve()
     checkpoint_path = checkpoint_path.expanduser().resolve()
-    if not detector_inputs.is_file():
-        raise ValueError(f"Detector input does not exist: {detector_inputs}")
-    if not video.is_file():
+    video = source_video.expanduser().resolve() if source_video is not None else None
+    if preview and video is None:
+        raise ValueError("A source video is required to render the 3D motion preview")
+    if video is not None and not video.is_file():
         raise ValueError(f"Video does not exist: {video}")
+    rig = load_rig_2d(rig_2d_path)
+    if video is not None:
+        expected_source_hash = rig.provenance.get("source_sha256")
+        actual_source_hash = file_sha256(video)
+        if expected_source_hash and actual_source_hash != expected_source_hash:
+            raise ValueError("Source video SHA-256 does not match the 2D rig provenance")
     device = resolve_device(device_name)
     model, config, checkpoint = load_inference_checkpoint(checkpoint_path, device)
     image_feature_dim = int(config["model"]["image_feature_dim"])
-    inputs = _load_detector_inputs(detector_inputs, image_feature_dim)
-    detector_provenance = json.loads(str(inputs["provenance_json"]))
+    inputs = rig.model_inputs(image_feature_dim)
     sequence_length = int(config["data"]["sequence_length"])
     stride = int(config["data"]["stride"])
-    fps = float(inputs["fps"])
-    from .video import file_sha256
+    fps = rig.fps
 
     checkpoint_digest = file_sha256(checkpoint_path)
+    rig_digest = file_sha256(rig_2d_path)
     request = {
         "inference_version": INFERENCE_VERSION,
-        "detector_request_hash": detector_provenance.get("request_hash"),
+        "rig_2d_sha256": rig_digest,
+        "rig_2d_request_hash": rig.provenance.get("request_hash"),
         "checkpoint_sha256": checkpoint_digest,
         "checkpoint_version": CHECKPOINT_VERSION,
         "sequence_length": sequence_length,
@@ -329,7 +297,8 @@ def infer_motion(
     provenance = {
         **request,
         "request_hash": request_hash,
-        "detector_inputs": str(detector_inputs),
+        "rig_2d": str(rig_2d_path),
+        "rig_2d_provenance": rig.provenance,
         "checkpoint": str(checkpoint_path),
         "checkpoint_compatibility_hash": checkpoint.get("compatibility_hash"),
         "checkpoint_data_bom_hash": checkpoint.get("data_bom_hash"),
@@ -338,7 +307,7 @@ def infer_motion(
         "frames": len(inputs["frame_mask"]),
         "joint_names": list(SKELETON.names),
     }
-    _write_npz_atomic(
+    write_npz_atomic(
         motion_path,
         **arrays,
         joint_names=np.asarray(SKELETON.names),
@@ -349,6 +318,7 @@ def infer_motion(
     )
     if preview:
         output_dir.mkdir(parents=True, exist_ok=True)
+        assert video is not None
         _render_motion_preview(
             video,
             inputs["source_frame_indices"].astype(np.int64),
@@ -357,7 +327,7 @@ def infer_motion(
             preview_path,
             fps,
         )
-    _write_json_atomic(
+    write_json_atomic(
         manifest_path,
         {
             **provenance,
@@ -373,3 +343,25 @@ def infer_motion(
         "manifest": str(manifest_path),
         "preview": str(preview_path) if preview else None,
     }
+
+
+def infer_motion(
+    detector_inputs: Path,
+    video: Path,
+    checkpoint_path: Path,
+    output_dir: Path,
+    *,
+    device_name: str = "auto",
+    force: bool = False,
+    preview: bool = True,
+) -> dict[str, Any]:
+    """Backward-compatible video-bound wrapper around :func:`infer_rig`."""
+    return infer_rig(
+        detector_inputs,
+        checkpoint_path,
+        output_dir,
+        source_video=video,
+        device_name=device_name,
+        force=force,
+        preview=preview,
+    )

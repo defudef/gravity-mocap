@@ -12,11 +12,11 @@ from .catalog import DatasetCatalog
 from .data import MotionWindowDataset
 from .download import describe, download_dataset
 from .fixture import create_fixture
-from .inference import infer_motion
+from .inference import infer_rig
 from .losses import compute_losses
 from .preprocess import preprocess_dataset
 from .trainer import build_model, load_config, run_training, training_plan
-from .video import default_inference_directory, detect_video
+from .video import default_video_output_directory, video_to_rig
 from .vision import (
     FrameManifestDataset,
     attach_features,
@@ -217,13 +217,13 @@ def command_attach_features(args: argparse.Namespace) -> int:
 
 
 def _video_output(args: argparse.Namespace) -> Path:
-    return args.output or default_inference_directory(
+    return args.output or default_video_output_directory(
         args.video.expanduser().resolve(), DEFAULT_DATA_ROOT
     )
 
 
-def command_detect_video(args: argparse.Namespace) -> int:
-    result = detect_video(
+def command_video_to_rig(args: argparse.Namespace) -> int:
+    result = video_to_rig(
         args.video,
         _video_output(args),
         data_root=DEFAULT_DATA_ROOT,
@@ -241,7 +241,7 @@ def command_detect_video(args: argparse.Namespace) -> int:
 
 def command_infer_video(args: argparse.Namespace) -> int:
     output = _video_output(args)
-    detector = detect_video(
+    rig = video_to_rig(
         args.video,
         output,
         data_root=DEFAULT_DATA_ROOT,
@@ -253,16 +253,32 @@ def command_infer_video(args: argparse.Namespace) -> int:
         force=args.force,
         preview=not args.no_preview,
     )
-    result = infer_motion(
-        Path(detector["detector_inputs"]),
-        args.video,
+    result = infer_rig(
+        Path(rig["rig_2d"]),
         args.checkpoint,
         output,
+        source_video=args.video,
         device_name=args.device,
         force=args.force,
         preview=not args.no_preview,
     )
-    result["detector_status"] = detector["status"]
+    result["rig_2d_status"] = rig["status"]
+    result["detector_status"] = rig["status"]
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def command_infer_rig(args: argparse.Namespace) -> int:
+    output = args.output or args.rig_2d.expanduser().resolve().parent
+    result = infer_rig(
+        args.rig_2d,
+        args.checkpoint,
+        output,
+        source_video=args.source_video,
+        device_name=args.device,
+        force=args.force,
+        preview=args.source_video is not None and not args.no_preview,
+    )
     print(json.dumps(result, indent=2))
     return 0
 
@@ -377,11 +393,29 @@ def build_parser() -> argparse.ArgumentParser:
     attach.add_argument("--catalog", default=str(DEFAULT_CATALOG))
     attach.set_defaults(handler=command_attach_features)
 
-    detect = subparsers.add_parser(
-        "detect-video", help="Extract a cached neutral 22-joint skeleton from video"
+    rig = subparsers.add_parser(
+        "video-to-rig",
+        aliases=["detect-video"],
+        help="Create a standalone cached neutral 22-joint 2D rig",
     )
-    _add_video_arguments(detect)
-    detect.set_defaults(handler=command_detect_video)
+    _add_video_arguments(rig)
+    rig.set_defaults(handler=command_video_to_rig)
+
+    infer_rig_parser = subparsers.add_parser(
+        "infer-rig", help="Run 2D rig -> clean-room 3D motion without rerunning detection"
+    )
+    infer_rig_parser.add_argument("rig_2d", type=Path)
+    infer_rig_parser.add_argument("--output", type=Path)
+    infer_rig_parser.add_argument(
+        "--source-video",
+        type=Path,
+        help="Optional matching source video; when provided, render the motion preview",
+    )
+    infer_rig_parser.add_argument("--checkpoint", type=Path, default=DEFAULT_INFERENCE_CHECKPOINT)
+    infer_rig_parser.add_argument("--device", default="auto", help="auto, cpu, mps, or cuda")
+    infer_rig_parser.add_argument("--force", action="store_true")
+    infer_rig_parser.add_argument("--no-preview", action="store_true")
+    infer_rig_parser.set_defaults(handler=command_infer_rig)
 
     infer = subparsers.add_parser(
         "infer-video", help="Run video -> 2D skeleton -> clean-room 3D motion"

@@ -95,9 +95,10 @@ a non-commercial public training dataset.
 installed packages. Their wheels and bundled third-party notices retain their
 own terms and must not be redistributed as if covered by this repository's
 Apache-2.0 license. Neither the MediaPipe task bundle nor dependency binaries
-are embedded in Gravity Mocap checkpoints or `motion.npz` output. The output
-records the detector model hash so downstream releases can audit which frontend
-produced it.
+are embedded in Gravity Mocap checkpoints, `rig-2d.npz`, or `motion.npz`
+output. The standalone 2D rig manifest records the detector model hash, URL,
+size, and source-video hash; 3D motion provenance carries that rig provenance
+forward so downstream releases can audit which frontend produced it.
 
 The optional automated mRI download path invokes pinned `@playwright/cli`
 0.1.17 (Apache-2.0) through an operator's Node.js/npm installation. It is not a

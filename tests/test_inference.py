@@ -6,10 +6,10 @@ import pytest
 import torch
 
 from gravity_mocap.checkpoint import CHECKPOINT_VERSION
-from gravity_mocap.inference import infer_motion, window_starts
+from gravity_mocap.inference import infer_motion, infer_rig, window_starts
 from gravity_mocap.model import GravityViewMotionModel
 from gravity_mocap.rotations import identity_rotation_6d, integrate_root_velocity
-from gravity_mocap.skeleton import SKELETON
+from gravity_mocap.skeleton import JOINT_NAMES, SKELETON
 
 
 def _checkpoint(path: Path) -> None:
@@ -40,7 +40,7 @@ def _checkpoint(path: Path) -> None:
 
 
 def _detector_inputs(path: Path, frames: int = 11) -> None:
-    provenance = {"request_hash": "detector-test"}
+    provenance = {"rig_2d_version": 1, "request_hash": "detector-test"}
     with path.open("wb") as handle:
         np.savez_compressed(
             handle,
@@ -53,6 +53,10 @@ def _detector_inputs(path: Path, frames: int = 11) -> None:
             pixel_bbox=np.tile(np.asarray([10, 10, 100, 180], dtype=np.float32), (frames, 1)),
             source_frame_indices=np.arange(frames, dtype=np.int64),
             fps=np.asarray(30.0, dtype=np.float32),
+            source_fps=np.asarray(30.0, dtype=np.float32),
+            frame_width=np.asarray(640, dtype=np.int32),
+            frame_height=np.asarray(480, dtype=np.int32),
+            joint_names=np.asarray(JOINT_NAMES),
             provenance_json=np.asarray(json.dumps(provenance)),
         )
 
@@ -104,3 +108,19 @@ def test_inference_writes_finite_neutral_motion(tmp_path: Path, frames: int) -> 
         preview=False,
     )
     assert cached["status"] == "cached"
+
+
+def test_infer_rig_does_not_require_source_video_without_preview(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "best.pt"
+    rig = tmp_path / "rig-2d.npz"
+    output = tmp_path / "output"
+    _checkpoint(checkpoint)
+    _detector_inputs(rig)
+
+    result = infer_rig(rig, checkpoint, output, device_name="cpu", preview=False)
+
+    assert result["status"] == "created"
+    with np.load(result["motion"], allow_pickle=False) as archive:
+        provenance = json.loads(str(archive["provenance_json"]))
+    assert provenance["rig_2d"] == str(rig)
+    assert provenance["rig_2d_provenance"]["request_hash"] == "detector-test"
