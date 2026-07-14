@@ -330,6 +330,16 @@ For convenience, the composed command still runs both stages:
   --checkpoint Saved/GravityMocap/runs/motion-small-v2/best.pt
 ```
 
+After a learned preview exists, compose a direct evaluation film with the
+source, MediaPipe baseline, and learned avatar in three aligned panels:
+
+```sh
+./scripts/video.sh compare-previews \
+  path/to/preview-detector-baseline.mp4 \
+  path/to/preview-motion.mp4 \
+  path/to/comparison.mp4
+```
+
 The operation is idempotent: unchanged source bytes, model, checkpoint, and
 arguments reuse the existing artifacts. `--force` rebuilds them. `--no-preview`
 skips MP4 rendering, `--device cpu|mps|cuda` overrides automatic device choice,
@@ -492,8 +502,10 @@ The paper and small-model configs hold out 10% of each source by complete
 subject when identity is available, otherwise by complete sequence. Validation
 never receives detector corruption and runs after every completed epoch. It
 logs held-out component losses, MPJPE, root-velocity error, integrated local
-root drift, acceleration error, and contact F1 to MLflow and writes the latest
-snapshot to `validation-state.json`. No validation window comes from a training
+root drift, acceleration error, and contact F1 to MLflow. When detector world
+3D is enabled it also logs the detector-prior MPJPE, input coverage, and the
+signed MPJPE gain of the model over that prior. The latest snapshot is written
+to `validation-state.json`. No validation window comes from a training
 subject/sequence holdout unit. The paper config monitors `loss.total` with
 `min_delta: 0.001` and stops after 20 consecutive validations without a
 meaningful improvement. The counter and best epoch/loss live in the full-state
@@ -509,7 +521,7 @@ immediately visible:
 [mlflow] run=... | experiment=gravity-mocap | tracking=sqlite:////.../mlflow.db
 [train] epoch 8/500 | batch 1/1 | step 8/500 | loss 0.369439 | lr 2.00e-04 | warming up | elapsed 1m 01s | ETA 1h 03m
 [validation] START | epoch 8/500 | windows=1,025
-[validation] DONE | epoch 8/500 | train_loss=0.612345 | val_loss=0.488491 | MPJPE=29.73cm | root_drift=59.97cm | contact_F1=0.2500 | time=26s | best=0.488491 | IMPROVED | early_stop=0/20
+[validation] DONE | epoch 8/500 | train_loss=0.612345 | val_loss=0.488491 | MPJPE=3.73cm | detector_MPJPE=4.12cm | MPJPE_gain=+0.39cm | root_drift=19.97cm | contact_F1=0.2500 | time=26s | best=0.488491 | IMPROVED | early_stop=0/20
 ```
 
 Open the local MLflow UI in a second terminal:

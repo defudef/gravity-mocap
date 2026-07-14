@@ -40,6 +40,21 @@ def compute_motion_metrics(
         "root_velocity_error_mps": _masked_mean(velocity_error, frame_mask),
         "root_local_drift_m": _masked_mean(root_local_drift, frame_mask),
     }
+    if "detector_joints_3d" in target and "detector_3d_confidence" in target:
+        detector_error = torch.linalg.vector_norm(
+            target["detector_joints_3d"] - target["joints_3d"], dim=-1
+        )
+        detector_mask = frame_mask.unsqueeze(-1) * (target["detector_3d_confidence"] > 0).to(
+            frame_mask.dtype
+        )
+        detector_mpjpe = _masked_mean(detector_error, detector_mask)
+        metrics["detector_prior_mpjpe_m"] = detector_mpjpe
+        metrics["detector_prior_coverage"] = _masked_mean(
+            (target["detector_3d_confidence"] > 0).to(frame_mask.dtype),
+            frame_mask,
+        )
+        # Positive means the learned output beats the detector prior.
+        metrics["mpjpe_gain_vs_detector_m"] = detector_mpjpe - metrics["mpjpe_m"]
 
     if predicted_joints.shape[1] >= 3:
         predicted_acceleration = (

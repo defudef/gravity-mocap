@@ -7,7 +7,7 @@ import numpy as np
 
 from .skeleton import SKELETON
 
-AVATAR_RENDER_VERSION = 1
+AVATAR_RENDER_VERSION = 2
 
 _INDEX = {name: index for index, name in enumerate(SKELETON.names)}
 _OUTLINE = (38, 39, 52)
@@ -225,6 +225,7 @@ def render_avatar_panel(
     scale: float,
     center: np.ndarray,
     nearer_positive: bool = True,
+    title: str = "Gravity Mocap - procedural 3D avatar",
 ) -> np.ndarray:
     """Render a depth-sorted procedural mannequin from the neutral 22-joint pose."""
     projected = np.empty((SKELETON.joint_count, 2), dtype=np.float32)
@@ -275,7 +276,7 @@ def render_avatar_panel(
 
     cv2.putText(
         panel,
-        "Gravity Mocap - procedural 3D avatar",
+        title,
         (20, 34),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.65,

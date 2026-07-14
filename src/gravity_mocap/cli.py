@@ -10,6 +10,7 @@ import torch
 
 from .baseline import infer_detector_baseline
 from .catalog import DatasetCatalog
+from .comparison import compare_motion_previews
 from .data import MotionWindowDataset
 from .download import describe, download_dataset
 from .fixture import create_fixture
@@ -347,6 +348,17 @@ def command_infer_detector_world(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_compare_previews(args: argparse.Namespace) -> int:
+    result = compare_motion_previews(
+        args.baseline_preview,
+        args.learned_preview,
+        args.output,
+        force=args.force,
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def _add_video_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("video", type=Path)
     parser.add_argument("--output", type=Path)
@@ -519,6 +531,16 @@ def build_parser() -> argparse.ArgumentParser:
     _add_video_arguments(baseline)
     baseline.add_argument("--smoothing-window", type=int, default=5)
     baseline.set_defaults(handler=command_infer_video_baseline)
+
+    compare = subparsers.add_parser(
+        "compare-previews",
+        help="Compose source, detector baseline, and learned 3D avatar previews",
+    )
+    compare.add_argument("baseline_preview", type=Path)
+    compare.add_argument("learned_preview", type=Path)
+    compare.add_argument("output", type=Path)
+    compare.add_argument("--force", action="store_true")
+    compare.set_defaults(handler=command_compare_previews)
     return parser
 
 

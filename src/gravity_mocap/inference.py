@@ -136,6 +136,7 @@ def _render_motion_preview(
     fps: float,
     *,
     nearer_positive: bool = True,
+    avatar_title: str = "Gravity Mocap - learned 3D avatar",
 ) -> None:
     cv2, _, _ = _video_dependencies()
     first_frame = next(_sampled_frames(video, indices[:1]))[2]
@@ -176,6 +177,7 @@ def _render_motion_preview(
                 scale=scale,
                 center=center,
                 nearer_positive=nearer_positive,
+                title=avatar_title,
             )
             writer.write(np.concatenate((frame, panel), axis=1))
     finally:
@@ -354,6 +356,7 @@ def infer_rig(
             preview_path,
             fps,
             nearer_positive=False,
+            avatar_title="B - learned Gravity-View v5",
         )
     write_json_atomic(
         manifest_path,

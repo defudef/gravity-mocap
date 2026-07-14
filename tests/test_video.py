@@ -4,6 +4,7 @@ import numpy as np
 
 from gravity_mocap.cli import (
     build_parser,
+    command_compare_previews,
     command_infer_detector_world,
     command_infer_rig,
     command_infer_video_baseline,
@@ -41,9 +42,13 @@ def test_video_to_rig_cli_has_backward_compatible_detector_alias() -> None:
     infer = parser.parse_args(["infer-rig", "rig-2d.npz"])
     detector_world = parser.parse_args(["infer-detector-world", "detector-world-3d.npz"])
     baseline = parser.parse_args(["infer-video-baseline", "walk.mp4"])
+    compare = parser.parse_args(
+        ["compare-previews", "baseline.mp4", "learned.mp4", "comparison.mp4"]
+    )
 
     assert canonical.handler is command_video_to_rig
     assert legacy.handler is command_video_to_rig
     assert infer.handler is command_infer_rig
     assert detector_world.handler is command_infer_detector_world
     assert baseline.handler is command_infer_video_baseline
+    assert compare.handler is command_compare_previews

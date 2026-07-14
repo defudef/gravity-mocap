@@ -148,6 +148,7 @@ def infer_detector_baseline(
             neutral_joints,
             preview_path,
             world.fps,
+            avatar_title="A - MediaPipe detector baseline",
         )
     write_json_atomic(
         manifest_path,

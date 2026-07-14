@@ -189,6 +189,15 @@ class ProgressLogger:
             f"contact_F1={metrics['contact_f1']:.4f}",
             f"time={format_duration(elapsed_seconds)}",
         ]
+        if "detector_prior_mpjpe_m" in metrics:
+            parts.insert(
+                4,
+                f"detector_MPJPE={metrics['detector_prior_mpjpe_m'] * 100:.2f}cm",
+            )
+            parts.insert(
+                5,
+                f"MPJPE_gain={metrics['mpjpe_gain_vs_detector_m'] * 100:+.2f}cm",
+            )
         if best_loss is not None:
             parts.append(f"best={best_loss:.6f}")
         if improved:

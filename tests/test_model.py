@@ -162,6 +162,9 @@ def test_held_out_evaluation_is_forward_only_and_reports_motion_metrics(tmp_path
 
     assert "loss.total" in metrics
     assert "mpjpe_m" in metrics
+    assert "detector_prior_mpjpe_m" in metrics
+    assert "mpjpe_gain_vs_detector_m" in metrics
+    assert 0 <= metrics["detector_prior_coverage"] <= 1
     assert "root_local_drift_m" in metrics
     assert all(torch.isfinite(torch.tensor(value)) for value in metrics.values())
     assert all(parameter.grad is None for parameter in model.parameters())
