@@ -94,6 +94,8 @@ def test_detector_augmentation_is_deterministic_and_preserves_clean_target(
     assert not np.array_equal(first["keypoints_2d"], next_epoch["keypoints_2d"])
     assert np.array_equal(first["keypoints_2d_target"], clean["keypoints_2d"][:8])
     assert not np.array_equal(first["keypoints_2d"], first["keypoints_2d_target"])
+    assert np.array_equal(first["bbox_target"], clean["bbox"][:8])
+    assert not np.array_equal(first["bbox"], first["bbox_target"])
     identity = np.asarray([1, 0, 0, 0, 1, 0], dtype=np.float32)
     assert np.allclose(first["camera_delta_6d"], identity)
 

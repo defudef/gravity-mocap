@@ -26,8 +26,8 @@ rotations, camera-frame orientation, Gravity-View orientation, local root
 velocity, weak camera, and six stationary probabilities (hands, toes, heels).
 
 The deliberate difference from the paper is removal of body shape and vertex
-losses. FK joint loss, 2D reprojection, temporal smoothness, contacts, root
-velocity, and orientation losses remain.
+losses. FK joint loss, camera-aware bbox-relative 2D reprojection, temporal
+smoothness, contacts, root velocity, and orientation losses remain.
 
 ## Architecture
 
@@ -40,11 +40,15 @@ Each frame fuses four independently projected inputs by element-wise addition:
 
 The production config uses 12 relative Transformer blocks, 8 attention heads,
 512 hidden dimensions, RoPE, and a receptive-field attention mask. Motion-only
-datasets are resampled to 30 FPS and receive deterministic simulated yaw,
-pitch, roll, translation, projected 2D joints, and zero visual features. Root
+datasets are resampled to 30 FPS, retargeted to the fixed neutral skeleton, and
+regenerated through FK so rotation and joint targets are exactly consistent.
+They receive deterministic simulated yaw, pitch, roll, translation, padded
+frame-relative bbox, bbox-relative 2D joints, and zero visual features. Root
 translation is preserved in the bbox input and root velocity is measured in
 metres per second. Paired-video shards use features from the from-scratch crop
-encoder; zero-feature motion shards gate that modality completely. The trainer
+encoder; zero-feature motion shards gate only that modality. The 2D
+reprojection remains active and supervises local pose, camera orientation, and
+weak camera even when `image_mask` is zero. The trainer
 uses CUDA mixed precision, all visible
 CUDA devices through `DataParallel`, micro-batches of 16, and 16-step gradient
 accumulation for an effective batch of 256; CPU/MPS remain valid slower paths.
@@ -125,9 +129,11 @@ Preprocessing logs progress every ten sequences and is safely repeatable.
 Existing atomic shards are reused only when their schema, provenance hash,
 source hashes, converter version, and preprocessing hash match the current
 input; stale or interrupted outputs are regenerated. The current converter
-records both source FPS and canonical 30 FPS. An older non-resampled corpus is
-therefore regenerated automatically, and its old checkpoint cannot be resumed
-against the new BOM/configuration.
+records both source FPS and canonical 30 FPS. The training audit also rejects a
+converter version older than the current FK-consistent target contract. Such a
+corpus is therefore regenerated automatically by preprocessing, and checkpoint
+version 2 cannot be resumed or used for inference; version 3 requires a fresh
+run on the regenerated shards.
 
 CMU's archive host currently serves an incomplete TLS chain. Downloads attempt
 HTTPS normally. Only an SSL chain failure may select the configured HTTP URL,

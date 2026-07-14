@@ -69,6 +69,7 @@ class MotionWindowDataset(Dataset[dict[str, torch.Tensor]]):
                 window = np.concatenate((window, padding), axis=0)
             result[name] = np.asarray(window, dtype=np.float32).copy()
         result["keypoints_2d_target"] = result["keypoints_2d"].copy()
+        result["bbox_target"] = result["bbox"].copy()
         if self.augmentation.get("enabled", False):
             relative = path.relative_to(self.root)
             digest = hashlib.sha256(
@@ -223,6 +224,7 @@ def audit_training_data(
     allow_synthetic: bool,
     image_feature_dim: int | None = None,
     expected_fps: float | None = None,
+    expected_converter_versions: Mapping[str, str] | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
     errors: list[str] = []
     bill_of_materials: dict[str, Any] = {"schema_version": 1, "shards": []}
@@ -274,10 +276,20 @@ def audit_training_data(
                 errors.append(
                     f"{path}: shard data-use acceptance flag does not match the approved catalog"
                 )
-            if member_regex := entry.downloader.get("member_regex"):
-                source_file = str(
-                    provenance.get("source_file") or provenance.get("source_sequence", "")
+            source_file = str(
+                provenance.get("source_file") or provenance.get("source_sequence", "")
+            )
+            if expected_converter_versions is not None:
+                expected_converter = expected_converter_versions.get(
+                    Path(source_file).suffix.lower(),
+                    expected_converter_versions["default"],
                 )
+                if provenance.get("converter_version") != expected_converter:
+                    errors.append(
+                        f"{path}: converter version {provenance.get('converter_version')!r} "
+                        f"does not match current {expected_converter!r}; rerun preprocess"
+                    )
+            if member_regex := entry.downloader.get("member_regex"):
                 if not re.search(str(member_regex), source_file):
                     errors.append(
                         f"{path}: source file {source_file!r} is outside the configured "

@@ -17,6 +17,7 @@ from torch.utils.data import DataLoader
 
 from .catalog import DatasetCatalog
 from .checkpoint import (
+    CHECKPOINT_VERSION,
     LATEST_CHECKPOINT,
     TrainingProgress,
     archive_latest_checkpoint,
@@ -38,6 +39,7 @@ from .data import (
 from .losses import compute_losses
 from .metrics import compute_motion_metrics
 from .model import GravityViewMotionModel
+from .preprocess import B3D_BVH_CONVERTER_VERSION, CONVERTER_VERSION
 from .tracking import MLflowTracker, ProgressLogger, resolve_tracking
 
 
@@ -149,6 +151,11 @@ def _audit_data(config: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict
         allow_synthetic=bool(config["data"].get("allow_synthetic", False)),
         image_feature_dim=int(config["model"]["image_feature_dim"]),
         expected_fps=float(config["data"]["target_fps"]),
+        expected_converter_versions={
+            "default": CONVERTER_VERSION,
+            ".b3d": B3D_BVH_CONVERTER_VERSION,
+            ".bvh": B3D_BVH_CONVERTER_VERSION,
+        },
     )
     return inventory, errors, bill_of_materials
 
@@ -237,6 +244,11 @@ def training_plan(
     if resume_path is not None:
         action = "resume"
         if state is not None:
+            if state.get("checkpoint_version") != CHECKPOINT_VERSION:
+                resume_errors.append(
+                    f"saved checkpoint version {state.get('checkpoint_version')!r} "
+                    f"does not match current {CHECKPOINT_VERSION}"
+                )
             if state.get("compatibility_hash") != compatibility_hash(config):
                 resume_errors.append("saved checkpoint is incompatible with the current config")
             if state.get("data_bom_hash") != data_bom_hash(bill_of_materials):

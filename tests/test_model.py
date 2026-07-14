@@ -66,6 +66,49 @@ def test_forward_and_losses_are_finite_without_training(tmp_path: Path) -> None:
     assert all(torch.isfinite(value) for value in metrics.values())
 
 
+def test_motion_targets_are_fk_consistent_and_reprojection_stays_active(
+    tmp_path: Path,
+) -> None:
+    create_fixture(tmp_path / "synthetic/walk.npz", frames=8, image_feature_dim=32)
+    dataset = MotionWindowDataset(tmp_path, sequence_length=8, stride=8)
+    batch = {name: value.unsqueeze(0) for name, value in dataset[0].items()}
+    prediction_names = (
+        "local_rotations_6d",
+        "root_velocity_local",
+        "gravity_view_orientation_6d",
+        "camera_orientation_6d",
+        "weak_camera",
+    )
+    prediction = {name: batch[name].clone() for name in prediction_names}
+    prediction["contacts"] = torch.where(
+        batch["contacts"] > 0.5,
+        torch.full_like(batch["contacts"], 10.0),
+        torch.full_like(batch["contacts"], -10.0),
+    )
+    weights = {
+        "rotations": 1.0,
+        "root_velocity": 1.0,
+        "orientation": 1.0,
+        "camera_orientation": 1.0,
+        "weak_camera": 1.0,
+        "contacts": 1.0,
+        "joints_3d": 1.0,
+        "reprojection_2d": 1.0,
+        "smoothness": 1.0,
+    }
+
+    losses = compute_losses(prediction, batch, weights)
+
+    assert batch["image_mask"].sum() == 0
+    assert losses["joints_3d"] < 1e-12
+    assert losses["reprojection_2d"] < 1e-10
+
+    shifted = {name: value.clone() for name, value in prediction.items()}
+    shifted["weak_camera"][..., 1] += 0.1
+    shifted_losses = compute_losses(shifted, batch, weights)
+    assert shifted_losses["reprojection_2d"] > 1e-3
+
+
 def test_zero_image_mask_completely_gates_visual_features(tmp_path: Path) -> None:
     create_fixture(tmp_path / "synthetic/walk.npz", frames=8, image_feature_dim=32)
     dataset = MotionWindowDataset(tmp_path, sequence_length=8, stride=8)

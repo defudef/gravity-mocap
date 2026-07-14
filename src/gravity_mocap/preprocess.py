@@ -25,8 +25,8 @@ from .catalog import DatasetEntry
 from .schema import REQUIRED_ARRAYS, SCHEMA_VERSION, stable_hash, write_shard
 from .skeleton import CONTACT_JOINTS, JOINT_NAMES, PARENTS, REST_OFFSETS
 
-CONVERTER_VERSION = "cleanroom-v2"
-B3D_BVH_CONVERTER_VERSION = "cleanroom-v3-b3d-trials-bvh"
+CONVERTER_VERSION = "cleanroom-v3-canonical-rig"
+B3D_BVH_CONVERTER_VERSION = "cleanroom-v4-b3d-trials-canonical-rig"
 DEFAULT_TARGET_FPS = 30.0
 DEFAULT_CAMERA_SIMULATION: dict[str, object] = {
     "yaw_degrees": [-180.0, 180.0],
@@ -39,6 +39,7 @@ DEFAULT_CAMERA_SIMULATION: dict[str, object] = {
     "pitch_drift_std_degrees": 0.1,
     "roll_drift_std_degrees": 0.05,
     "translation_drift_std_meters": 0.001,
+    "bbox_padding": 0.12,
 }
 
 
@@ -88,8 +89,7 @@ def _safe_extract_zip(archive_path: Path, extraction_root: Path) -> None:
                     shutil.copyfileobj(source, target, length=8 * 1024 * 1024)
                 if index == 1 or index % 100 == 0 or index == len(file_members):
                     print(
-                        f"[preprocess] extracting {archive_path.name}: "
-                        f"{index}/{len(file_members)}",
+                        f"[preprocess] extracting {archive_path.name}: {index}/{len(file_members)}",
                         flush=True,
                     )
         (temporary / marker.name).write_text(json.dumps(expected_marker, sort_keys=True))
@@ -201,6 +201,24 @@ def _align_vectors(source: np.ndarray, target: np.ndarray) -> np.ndarray:
     return (np.eye(3) + skew + skew @ skew * ((1 - dot) / (norm * norm))).astype(np.float32)
 
 
+def _fit_world_rotation(rest_vectors: np.ndarray, observed_vectors: np.ndarray) -> np.ndarray:
+    rest = np.asarray(rest_vectors, dtype=np.float64)
+    observed = np.asarray(observed_vectors, dtype=np.float64)
+    valid = (np.linalg.norm(rest, axis=-1) > 1e-8) & (np.linalg.norm(observed, axis=-1) > 1e-8)
+    rest = rest[valid]
+    observed = observed[valid]
+    if not len(rest):
+        return np.eye(3, dtype=np.float32)
+    if len(rest) == 1:
+        return _align_vectors(rest[0], observed[0])
+    rest /= np.linalg.norm(rest, axis=-1, keepdims=True)
+    observed /= np.linalg.norm(observed, axis=-1, keepdims=True)
+    left, _, right_transpose = np.linalg.svd(observed.T @ rest)
+    correction = np.eye(3, dtype=np.float64)
+    correction[-1, -1] = np.sign(np.linalg.det(left @ right_transpose))
+    return (left @ correction @ right_transpose).astype(np.float32)
+
+
 def _estimate_local_rotations(joints: np.ndarray) -> np.ndarray:
     frames, joint_count = joints.shape[:2]
     children = [
@@ -212,25 +230,62 @@ def _estimate_local_rotations(joints: np.ndarray) -> np.ndarray:
     ).reshape(frames, joint_count, 3, 3)
     for frame in range(frames):
         world = [np.eye(3, dtype=np.float32) for _ in range(joint_count)]
-        right = joints[frame, 2] - joints[frame, 1]
-        up = joints[frame, 9] - joints[frame, 0]
-        right /= max(np.linalg.norm(right), 1e-8)
-        up -= right * np.dot(right, up)
-        up /= max(np.linalg.norm(up), 1e-8)
-        forward = np.cross(right, up)
-        world[0] = np.stack((right, up, forward), axis=-1)
-        local[frame, 0] = world[0]
-        for joint in range(1, joint_count):
-            parent = int(PARENTS[joint])
+        for joint in range(joint_count):
             if children[joint]:
-                child = children[joint][0]
-                rest = REST_OFFSETS[child]
-                observed = joints[frame, child] - joints[frame, joint]
-                world[joint] = _align_vectors(rest, observed)
+                rest = np.stack([REST_OFFSETS[child] for child in children[joint]])
+                observed = np.stack(
+                    [joints[frame, child] - joints[frame, joint] for child in children[joint]]
+                )
+                world[joint] = _fit_world_rotation(rest, observed)
+            elif joint == 0:
+                world[joint] = np.eye(3, dtype=np.float32)
             else:
+                parent = int(PARENTS[joint])
                 world[joint] = world[parent]
-            local[frame, joint] = world[parent].T @ world[joint]
+            parent = int(PARENTS[joint])
+            local[frame, joint] = world[joint] if parent < 0 else world[parent].T @ world[joint]
     return np.concatenate((local[..., :, 0], local[..., :, 1]), axis=-1).astype(np.float32)
+
+
+def _rotation_6d_to_matrix(value: np.ndarray) -> np.ndarray:
+    first = value[..., :3]
+    second = value[..., 3:]
+    first = first / np.linalg.norm(first, axis=-1, keepdims=True).clip(1e-8)
+    second = second - np.sum(first * second, axis=-1, keepdims=True) * first
+    second = second / np.linalg.norm(second, axis=-1, keepdims=True).clip(1e-8)
+    third = np.cross(first, second)
+    return np.stack((first, second, third), axis=-1).astype(np.float32)
+
+
+def _forward_kinematics(local_rotations_6d: np.ndarray) -> np.ndarray:
+    local = _rotation_6d_to_matrix(local_rotations_6d)
+    world_rotations: list[np.ndarray] = []
+    world_positions: list[np.ndarray] = []
+    root = np.zeros((len(local), 3), dtype=np.float32)
+    for joint, parent_value in enumerate(PARENTS):
+        parent = int(parent_value)
+        if parent < 0:
+            world_rotations.append(local[:, joint])
+            world_positions.append(root)
+            continue
+        parent_rotation = world_rotations[parent]
+        world_rotations.append(parent_rotation @ local[:, joint])
+        offset = np.broadcast_to(REST_OFFSETS[joint], root.shape)
+        world_positions.append(
+            world_positions[parent] + (parent_rotation @ offset[..., None])[..., 0]
+        )
+    return np.stack(world_positions, axis=1).astype(np.float32)
+
+
+def canonicalize_motion_skeleton(joints: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Retarget observed joint directions to the fixed neutral skeleton."""
+    joints = np.asarray(joints, dtype=np.float32)
+    if joints.ndim != 3 or joints.shape[1:] != (len(JOINT_NAMES), 3):
+        raise ValueError(f"Expected joints shaped (T, {len(JOINT_NAMES)}, 3), got {joints.shape}")
+    if not np.isfinite(joints).all():
+        raise ValueError("Motion joints must be finite")
+    local_rotations = _estimate_local_rotations(joints)
+    return local_rotations, _forward_kinematics(local_rotations)
 
 
 def resample_positions(
@@ -320,6 +375,10 @@ def resolve_camera_simulation(config: dict[str, object] | None) -> dict[str, obj
         if not np.isfinite(value) or value < 0:
             raise ValueError(f"synthetic_camera.{name} must be finite and non-negative")
         resolved[name] = value
+    bbox_padding = float(resolved["bbox_padding"])
+    if not np.isfinite(bbox_padding) or not 0 <= bbox_padding < 1:
+        raise ValueError("synthetic_camera.bbox_padding must be in [0, 1)")
+    resolved["bbox_padding"] = bbox_padding
     if _camera_range(resolved, "distance_meters")[0] <= 0:
         raise ValueError("synthetic_camera.distance_meters must stay positive")
     return resolved
@@ -330,7 +389,15 @@ def _simulate_inputs(
     image_feature_dim: int,
     seed: int,
     camera_config: dict[str, object] | None = None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
     config = resolve_camera_simulation(camera_config)
     generator = np.random.default_rng(seed)
     yaw_range = np.deg2rad(_camera_range(config, "yaw_degrees"))
@@ -362,7 +429,8 @@ def _simulate_inputs(
     # Keep actor translation relative to the first frame. Per-frame root centering
     # made root motion unobservable from the simulated detector inputs.
     world = joints - joints[:1, :1]
-    camera_points = np.einsum("tij,tkj->tki", camera, world)
+    centered = world - world[:, :1]
+    camera_centered = np.einsum("tij,tkj->tki", camera, centered)
     horizontal_range = _camera_range(config, "horizontal_offset_meters")
     vertical_range = _camera_range(config, "vertical_offset_meters")
     distance_range = _camera_range(config, "distance_meters")
@@ -378,15 +446,24 @@ def _simulate_inputs(
         ),
         axis=-1,
     ).astype(np.float32)
-    camera_points += translation[:, None]
-    xy = camera_points[..., :2] / np.maximum(camera_points[..., 2:], 0.25)
+    camera_root = np.einsum("tij,tj->ti", camera, world[:, 0]) + translation
+    depth = np.maximum(camera_root[:, 2], 0.25)
+    scale = 1.0 / depth
+    shift = camera_root[:, :2] / depth[:, None]
+    xy = camera_centered[..., :2] * scale[:, None, None] + shift[:, None, :]
     minimum = xy.min(axis=1)
     maximum = xy.max(axis=1)
     size = np.maximum(maximum - minimum, 1e-4)
-    normalized = (xy - minimum[:, None]) / size[:, None]
+    padding = float(config["bbox_padding"])
+    bbox_minimum = np.clip(minimum - size * padding, -1.0, 1.0)
+    bbox_maximum = np.clip(maximum + size * padding, -1.0, 1.0)
+    bbox_size = np.maximum(bbox_maximum - bbox_minimum, 1e-4)
+    normalized = (xy - bbox_minimum[:, None]) / bbox_size[:, None]
     confidence = np.ones((*normalized.shape[:-1], 1), dtype=np.float32)
-    keypoints = np.concatenate((normalized * 2 - 1, confidence), axis=-1).astype(np.float32)
-    bbox = np.concatenate((minimum, maximum), axis=-1).astype(np.float32)
+    keypoints = np.concatenate((np.clip(normalized * 2 - 1, -1.0, 1.0), confidence), axis=-1)
+    keypoints = keypoints.astype(np.float32)
+    bbox = np.concatenate((bbox_minimum, bbox_maximum), axis=-1).astype(np.float32)
+    weak_camera = np.concatenate((scale[:, None], shift), axis=-1).astype(np.float32)
     image_features = np.zeros((len(joints), image_feature_dim), dtype=np.float32)
     camera_delta = np.repeat(np.eye(3, dtype=np.float32)[None], len(joints), axis=0)
     camera_delta[1:] = camera[1:] @ np.swapaxes(camera[:-1], -1, -2)
@@ -399,7 +476,7 @@ def _simulate_inputs(
         1e-8
     )
     gravity_view[:, :, 2] = np.cross(gravity_view[:, :, 0], gravity_view[:, :, 1])
-    return bbox, keypoints, image_features, camera_delta_6d, camera, gravity_view
+    return bbox, keypoints, image_features, camera_delta_6d, camera, gravity_view, weak_camera
 
 
 def motion_to_arrays(
@@ -410,8 +487,9 @@ def motion_to_arrays(
     camera_config: dict[str, object] | None = None,
 ) -> dict[str, np.ndarray]:
     joints = np.asarray(joints, dtype=np.float32)
-    local_rotations = _estimate_local_rotations(joints)
     root_world = joints[:, 0]
+    local_rotations, centered_joints = canonicalize_motion_skeleton(joints)
+    canonical_world = centered_joints + root_world[:, None]
     root_displacement = np.zeros_like(root_world)
     root_displacement[:-1] = (root_world[1:] - root_world[:-1]) * float(fps)
     root_matrices = np.stack(
@@ -421,15 +499,24 @@ def motion_to_arrays(
     root_velocity_local = (np.swapaxes(root_matrices, -1, -2) @ root_displacement[..., None])[
         ..., 0
     ]
-    bbox, keypoints, image_features, camera_delta_6d, camera, gravity_view = _simulate_inputs(
-        joints, image_feature_dim, seed, camera_config
-    )
+    (
+        bbox,
+        keypoints,
+        image_features,
+        camera_delta_6d,
+        camera,
+        gravity_view,
+        weak_camera,
+    ) = _simulate_inputs(canonical_world, image_feature_dim, seed, camera_config)
     velocity = np.zeros((len(joints), len(CONTACT_JOINTS)), dtype=np.float32)
     velocity[1:] = (
-        np.linalg.norm(joints[1:, CONTACT_JOINTS] - joints[:-1, CONTACT_JOINTS], axis=-1) * fps
+        np.linalg.norm(
+            canonical_world[1:, CONTACT_JOINTS] - canonical_world[:-1, CONTACT_JOINTS], axis=-1
+        )
+        * fps
     )
-    floor = float(np.percentile(joints[:, [7, 8, 10, 11], 1], 2))
-    low = joints[:, CONTACT_JOINTS, 1] < floor + 0.09
+    floor = float(np.percentile(canonical_world[:, [7, 8, 10, 11], 1], 2))
+    low = canonical_world[:, CONTACT_JOINTS, 1] < floor + 0.09
     low[:, :2] = True
     contacts = ((velocity < 0.08) & low).astype(np.float32)
     camera_orientation = camera @ root_matrices
@@ -440,9 +527,6 @@ def motion_to_arrays(
     gravity_orientation_6d = np.concatenate(
         (gravity_orientation[..., :, 0], gravity_orientation[..., :, 1]), axis=-1
     )
-    centered_joints = joints - root_world[:, None]
-    weak_camera = np.zeros((len(joints), 3), dtype=np.float32)
-    weak_camera[:, 0] = 0.25
     return {
         "bbox": bbox,
         "keypoints_2d": keypoints,
@@ -475,9 +559,7 @@ def _sources(entry: DatasetEntry, raw_root: Path) -> list[RawSource]:
     if member_regex := entry.downloader.get("member_regex"):
         pattern = re.compile(str(member_regex))
         paths = [
-            path
-            for path in paths
-            if pattern.search(path.relative_to(dataset_root).as_posix())
+            path for path in paths if pattern.search(path.relative_to(dataset_root).as_posix())
         ]
     return [RawSource(path, (path,)) for path in paths]
 
@@ -545,9 +627,7 @@ def preprocess_dataset(
         raise ValueError("limit must be positive")
     resolved_camera_config = resolve_camera_simulation(camera_config)
     cuts = (
-        _load_100style_cuts(raw_root / entry.dataset_id)
-        if entry.dataset_id == "100style"
-        else {}
+        _load_100style_cuts(raw_root / entry.dataset_id) if entry.dataset_id == "100style" else {}
     )
     hash_cache: dict[Path, str] = {}
     cached = 0

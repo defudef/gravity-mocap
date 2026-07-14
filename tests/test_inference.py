@@ -95,8 +95,10 @@ def test_inference_writes_finite_neutral_motion(tmp_path: Path, frames: int) -> 
     assert result["status"] == "created"
     with np.load(result["motion"], allow_pickle=False) as archive:
         assert archive["local_rotations_6d"].shape == (frames, SKELETON.joint_count, 6)
+        assert archive["joints_camera"].shape == (frames, SKELETON.joint_count, 3)
         assert archive["joints_world"].shape == (frames, SKELETON.joint_count, 3)
         assert archive["contacts"].shape == (frames, len(SKELETON.contact_joints))
+        assert np.isfinite(archive["joints_camera"]).all()
         assert np.isfinite(archive["joints_world"]).all()
 
     cached = infer_motion(
@@ -124,3 +126,16 @@ def test_infer_rig_does_not_require_source_video_without_preview(tmp_path: Path)
         provenance = json.loads(str(archive["provenance_json"]))
     assert provenance["rig_2d"] == str(rig)
     assert provenance["rig_2d_provenance"]["request_hash"] == "detector-test"
+
+
+def test_infer_rig_rejects_checkpoint_from_old_target_contract(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "old.pt"
+    rig = tmp_path / "rig-2d.npz"
+    _checkpoint(checkpoint)
+    payload = torch.load(checkpoint, map_location="cpu", weights_only=True)
+    payload["checkpoint_version"] = CHECKPOINT_VERSION - 1
+    torch.save(payload, checkpoint)
+    _detector_inputs(rig)
+
+    with pytest.raises(RuntimeError, match="Unsupported checkpoint version"):
+        infer_rig(rig, checkpoint, tmp_path / "output", device_name="cpu", preview=False)

@@ -116,7 +116,8 @@ from an earlier investigation are ignored by the official training corpus.
   BVH motion adapters;
 - provenance-bearing, finite-value-validated NPZ shards;
 - canonical 30 FPS preprocessing with source/target rates in provenance;
-- simulated full camera motion, bbox, and 2D-keypoint inputs for motion-only sequences;
+- FK-consistent neutral-skeleton targets plus simulated full camera motion,
+  detector-style padded bbox, and bbox-relative 2D inputs for motion-only sequences;
 - deterministic detector corruption (noise, low confidence, missing joints,
   occlusion, bbox jitter, and optional unknown-camera input);
 - source-stratified, subject/sequence-disjoint validation with 3D motion metrics,
@@ -205,10 +206,13 @@ Preprocessing reports progress every ten sequences. Repeating the command
 reuses atomic shards only when their schema, provenance, source hashes,
 converter version, and preprocessing configuration still match; interrupted or
 stale outputs are regenerated. All supported motion is resampled to 30 FPS,
-and root velocity is stored in metres per second. All trials from one B3D stay
-in the same train/validation group, so the split cannot leak neighboring trials
-from one source file. Changing that temporal contract or the synthetic-camera
-configuration invalidates old shards and checkpoints by design.
+retargeted to the fixed neutral rig, and regenerated through forward kinematics
+so local-rotation and 3D-joint targets describe the same skeleton exactly. Root
+velocity is stored in metres per second. All trials from one B3D stay in the
+same train/validation group, so the split cannot leak neighboring trials from
+one source file. Changing that target contract, temporal contract, or the
+synthetic-camera configuration invalidates old shards and checkpoints by
+design; the training audit rejects stale converter versions.
 
 ## Video -> neutral 2D rig
 
@@ -279,7 +283,8 @@ video hash must match the rig provenance. The 3D stage adds:
 
 - `motion.npz` contains rotations, FK joints, root translation, contacts, FPS,
   topology, and provenance;
-- `preview-motion.mp4` places the 2D input beside a neutral 3D skeleton;
+- `preview-motion.mp4` places the 2D input beside the neutral 3D skeleton in
+  the predicted camera frame;
 - `motion-manifest.json` carries the complete rig/source/model and checkpoint
   provenance.
 
@@ -294,9 +299,16 @@ The operation is idempotent: unchanged source bytes, model, checkpoint, and
 arguments reuse the existing artifacts. `--force` rebuilds them. `--no-preview`
 skips MP4 rendering, `--device cpu|mps|cuda` overrides automatic device choice,
 and `--output PATH` selects another directory. Static/unknown camera motion is
-currently represented by identity camera deltas; zero image features are
-explicitly disabled by `image_mask`, so this frontend works with the existing
-motion-only checkpoint.
+currently represented by identity camera deltas. `image_mask` gates only the
+optional learned crop features; 2D keypoints and their camera-aware reprojection
+loss remain active for motion-only training.
+
+Checkpoint version 3 is the first version trained against the FK-consistent
+rig and camera-aware 2D target contract. Version 2 checkpoints are rejected by
+training resume and inference instead of silently producing misleading output.
+This repository still ships no trained weights, so a new checkpoint must be
+trained from regenerated shards before the 3D stage is representative. The 2D
+rig frontend does not require that checkpoint and remains usable independently.
 
 MediaPipe tracking improves temporal stability but still assumes one principal
 person. Long detector gaps fail closed instead of silently inventing a track;

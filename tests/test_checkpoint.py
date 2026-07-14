@@ -1,3 +1,4 @@
+import json
 import random
 from pathlib import Path
 
@@ -7,6 +8,7 @@ import torch
 import yaml
 
 from gravity_mocap.checkpoint import (
+    CHECKPOINT_VERSION,
     TrainingProgress,
     cleanup_stale_checkpoint_temps,
     compatibility_hash,
@@ -248,6 +250,36 @@ def test_training_plan_never_constructs_an_optimizer(
     assert plan["validation"]["early_stopping"]["enabled"] is False
     assert plan["progress_logging"]["mlflow_enabled"] is True
     assert not (tmp_path / "run" / "mlflow" / "mlflow.db").exists()
+
+
+def test_training_plan_reports_old_checkpoint_target_contract(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/train-smoke.yaml")
+    data_root = tmp_path / "fixtures"
+    create_fixture(data_root / "synthetic" / "walk.npz", frames=16, image_feature_dim=32)
+    config["data"]["root"] = str(data_root)
+    config["data"]["catalog"] = str(ROOT / "configs/datasets.yaml")
+    config_path = tmp_path / "train.yaml"
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False))
+    output = tmp_path / "run"
+    output.mkdir()
+    (output / "latest.pt").write_bytes(b"metadata-only dry-run fixture")
+    (output / "training-state.json").write_text(
+        json.dumps(
+            {
+                "checkpoint_version": CHECKPOINT_VERSION - 1,
+                "compatibility_hash": compatibility_hash(config),
+                "data_bom_hash": "stale",
+                "next_epoch": 1,
+                "complete": False,
+                "stop_reason": None,
+            }
+        )
+    )
+
+    plan = training_plan(config_path, output)
+
+    assert plan["ready"] is False
+    assert any("saved checkpoint version" in error for error in plan["resume_audit"]["errors"])
 
 
 def test_training_session_limits_are_positive_and_mutually_exclusive() -> None:

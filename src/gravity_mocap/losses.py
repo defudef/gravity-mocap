@@ -4,6 +4,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
+from .projection import project_motion_to_bbox
 from .rotations import forward_kinematics, rotation_6d_to_matrix
 from .skeleton import PARENTS, REST_OFFSETS
 
@@ -53,9 +54,10 @@ def compute_losses(
     predicted_joints = forward_kinematics(rotations, root, offsets, parents)
     losses["joints_3d"] = _masked_mean((predicted_joints - target["joints_3d"]).square(), mask)
 
-    projected = predicted_joints[..., :2] / predicted_joints[..., 2:].abs().clamp_min(0.25)
+    reprojection_bbox = target.get("bbox_target", target["bbox"])
+    projected = project_motion_to_bbox(prediction, predicted_joints, reprojection_bbox)
     reprojection_target = target.get("keypoints_2d_target", target["keypoints_2d"])
-    keypoint_confidence = reprojection_target[..., 2] * target["image_mask"].unsqueeze(-1)
+    keypoint_confidence = reprojection_target[..., 2] * mask.unsqueeze(-1)
     losses["reprojection_2d"] = _masked_mean(
         (projected - reprojection_target[..., :2]).square(), keypoint_confidence
     )

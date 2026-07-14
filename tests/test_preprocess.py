@@ -150,7 +150,12 @@ def test_camera_simulation_is_seeded_and_configurable() -> None:
     )
 
     assert np.array_equal(first["keypoints_2d"], repeated["keypoints_2d"])
-    assert not np.array_equal(first["keypoints_2d"], far["keypoints_2d"])
+    assert np.array_equal(first["bbox"], repeated["bbox"])
+    assert not np.array_equal(first["bbox"], far["bbox"])
+    assert np.abs(first["keypoints_2d"][..., :2]).max() == pytest.approx(
+        1.0 / 1.24,
+        abs=1e-5,
+    )
 
 
 def test_split_groups_preserve_cmu_subjects_and_100style_styles() -> None:
@@ -178,12 +183,9 @@ def test_split_groups_preserve_cmu_subjects_and_100style_styles() -> None:
     )
 
     assert (
-        _source_split_group(cmu, Path("archive/subjects/135/135_01.amc"))
-        == "archive/subjects/135"
+        _source_split_group(cmu, Path("archive/subjects/135/135_01.amc")) == "archive/subjects/135"
     )
-    assert _source_split_group(style, Path("100STYLE/Kick/Kick_FW.bvh")) == (
-        "100STYLE/Kick"
-    )
+    assert _source_split_group(style, Path("100STYLE/Kick/Kick_FW.bvh")) == ("100STYLE/Kick")
 
 
 def test_resampling_normalizes_time_and_root_velocity_to_30_fps() -> None:
@@ -253,7 +255,7 @@ def test_preprocess_reuses_matching_atomic_shard(
     _, provenance = read_shard(first[0])
     assert provenance["source_fps"] == 30.0
     assert provenance["fps"] == 30.0
-    assert provenance["converter_version"] == "cleanroom-v2"
+    assert provenance["converter_version"] == preprocess.CONVERTER_VERSION
     monkeypatch.setattr(
         preprocess,
         "motion_to_arrays",
@@ -272,10 +274,7 @@ def test_preprocess_emits_every_b3d_trial_with_one_split_group(
 ) -> None:
     raw_root = tmp_path / "raw"
     output_root = tmp_path / "processed"
-    path = (
-        raw_root
-        / "addbiomechanics/train/With_Arm/Study_With_Arm/subject/subject.b3d"
-    )
+    path = raw_root / "addbiomechanics/train/With_Arm/Study_With_Arm/subject/subject.b3d"
     path.parent.mkdir(parents=True)
     path.write_bytes(b"fake-b3d")
     rest = np.zeros_like(REST_OFFSETS)

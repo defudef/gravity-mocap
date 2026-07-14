@@ -11,6 +11,7 @@ import torch
 from .artifacts import write_json_atomic, write_npz_atomic
 from .checkpoint import CHECKPOINT_VERSION
 from .model import GravityViewMotionModel
+from .projection import camera_space_joints
 from .rig2d import load_rig_2d
 from .rotations import (
     forward_kinematics,
@@ -22,7 +23,7 @@ from .schema import stable_hash
 from .skeleton import SKELETON
 from .video import _sampled_frames, _video_dependencies, file_sha256
 
-INFERENCE_VERSION = 1
+INFERENCE_VERSION = 2
 
 
 def resolve_device(name: str) -> torch.device:
@@ -277,6 +278,11 @@ def infer_rig(
         offsets,
         parents,
     )
+    camera_joints = camera_space_joints(
+        local_rotations_6d,
+        prediction["camera_orientation_6d"],
+        centered_joints,
+    )
     world_joints = centered_joints + root_translation.unsqueeze(-2)
     contacts = torch.sigmoid(prediction["contacts"])
 
@@ -288,6 +294,7 @@ def infer_rig(
         "root_velocity_local": root_velocity.cpu().numpy(),
         "root_translation": root_translation.cpu().numpy(),
         "joints_3d": centered_joints.cpu().numpy(),
+        "joints_camera": camera_joints.cpu().numpy(),
         "joints_world": world_joints.cpu().numpy(),
         "contacts": contacts.cpu().numpy(),
         "weak_camera": prediction["weak_camera"].cpu().numpy(),
@@ -323,7 +330,7 @@ def infer_rig(
             video,
             inputs["source_frame_indices"].astype(np.int64),
             inputs["pixel_keypoints"],
-            arrays["joints_3d"],
+            arrays["joints_camera"],
             preview_path,
             fps,
         )
