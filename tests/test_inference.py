@@ -10,9 +10,14 @@ from gravity_mocap.inference import infer_motion, infer_rig, window_starts
 from gravity_mocap.model import GravityViewMotionModel
 from gravity_mocap.rotations import identity_rotation_6d, integrate_root_velocity
 from gravity_mocap.skeleton import JOINT_NAMES, SKELETON
+from gravity_mocap.world3d import (
+    DETECTOR_WORLD_3D_VERSION,
+    DetectorWorld3D,
+    write_detector_world_3d,
+)
 
 
-def _checkpoint(path: Path) -> None:
+def _checkpoint(path: Path, *, use_detector_world_3d: bool = False) -> None:
     model_config = {
         "joints": 22,
         "image_feature_dim": 8,
@@ -22,6 +27,7 @@ def _checkpoint(path: Path) -> None:
         "mlp_ratio": 2,
         "dropout": 0.0,
         "attention_radius": 8,
+        "use_detector_world_3d": use_detector_world_3d,
     }
     model = GravityViewMotionModel(**model_config)
     torch.save(
@@ -59,6 +65,29 @@ def _detector_inputs(path: Path, frames: int = 11) -> None:
             joint_names=np.asarray(JOINT_NAMES),
             provenance_json=np.asarray(json.dumps(provenance)),
         )
+
+
+def _detector_world_3d(path: Path, frames: int = 11) -> None:
+    joints = np.zeros((frames, SKELETON.joint_count, 3), dtype=np.float32)
+    for joint, parent in enumerate(SKELETON.parents):
+        if parent >= 0:
+            joints[:, joint] = joints[:, int(parent)] + SKELETON.rest_offsets[joint]
+    write_detector_world_3d(
+        path,
+        DetectorWorld3D(
+            joints_3d=joints,
+            confidence=np.ones((frames, SKELETON.joint_count), dtype=np.float32),
+            frame_mask=np.ones(frames, dtype=np.float32),
+            source_frame_indices=np.arange(frames, dtype=np.int64),
+            fps=30.0,
+            source_fps=30.0,
+            provenance={
+                "detector_world_3d_version": DETECTOR_WORLD_3D_VERSION,
+                "artifact_type": "gravity-mocap-detector-world-3d",
+                "source_sha256": "source-test",
+            },
+        ),
+    )
 
 
 def test_window_starts_cover_tail_exactly() -> None:
@@ -139,3 +168,29 @@ def test_infer_rig_rejects_checkpoint_from_old_target_contract(tmp_path: Path) -
 
     with pytest.raises(RuntimeError, match="Unsupported checkpoint version"):
         infer_rig(rig, checkpoint, tmp_path / "output", device_name="cpu", preview=False)
+
+
+def test_v2_inference_requires_and_uses_detector_world_3d(tmp_path: Path) -> None:
+    checkpoint = tmp_path / "best.pt"
+    rig = tmp_path / "rig-2d.npz"
+    world = tmp_path / "detector-world-3d.npz"
+    _checkpoint(checkpoint, use_detector_world_3d=True)
+    _detector_inputs(rig)
+    _detector_world_3d(world)
+
+    with pytest.raises(ValueError, match="requires a detector world-3D artifact"):
+        infer_rig(rig, checkpoint, tmp_path / "missing", device_name="cpu", preview=False)
+
+    result = infer_rig(
+        rig,
+        checkpoint,
+        tmp_path / "output",
+        detector_world_3d_path=world,
+        device_name="cpu",
+        preview=False,
+    )
+
+    assert result["status"] == "created"
+    with np.load(result["motion"], allow_pickle=False) as archive:
+        provenance = json.loads(str(archive["provenance_json"]))
+    assert provenance["detector_world_3d"] == str(world)

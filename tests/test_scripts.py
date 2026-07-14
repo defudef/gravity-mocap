@@ -171,8 +171,8 @@ def test_fresh_training_executes_in_order_and_archives_previous_run(
         "--dataset 100style --execute",
     ]
     assert calls[4] == (
-        "mocap preprocess --profile core --dataset cmu_mocap --dataset addbiomechanics "
-        "--dataset 100style"
+        f"mocap preprocess --config {fake_repo / 'configs/train-paper.yaml'} --profile core "
+        "--dataset cmu_mocap --dataset addbiomechanics --dataset 100style"
     )
     assert ".fresh-plan-" in calls[5]
     assert f"args={expected_limit} --resume never" in calls[5]

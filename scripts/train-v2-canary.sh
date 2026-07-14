@@ -8,7 +8,5 @@ case "$DATA_ROOT" in
   *) DATA_ROOT="$REPO_ROOT/$DATA_ROOT" ;;
 esac
 
-export GRAVITY_MOCAP_CONFIG="$REPO_ROOT/configs/train-small.yaml"
-export GRAVITY_MOCAP_OUTPUT="${GRAVITY_MOCAP_OUTPUT:-$DATA_ROOT/runs/motion-small-v2}"
-
-exec "$REPO_ROOT/scripts/train.sh" "$@"
+export GRAVITY_MOCAP_OUTPUT="${GRAVITY_MOCAP_OUTPUT:-$DATA_ROOT/runs/motion-small-v2-canary}"
+exec "$REPO_ROOT/scripts/train-small.sh" --max-epochs 3 --resume never "$@"

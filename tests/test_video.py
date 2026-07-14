@@ -2,7 +2,13 @@ from pathlib import Path
 
 import numpy as np
 
-from gravity_mocap.cli import build_parser, command_infer_rig, command_video_to_rig
+from gravity_mocap.cli import (
+    build_parser,
+    command_infer_detector_world,
+    command_infer_rig,
+    command_infer_video_baseline,
+    command_video_to_rig,
+)
 from gravity_mocap.video import default_inference_directory, selected_frame_indices
 
 
@@ -33,7 +39,11 @@ def test_video_to_rig_cli_has_backward_compatible_detector_alias() -> None:
     canonical = parser.parse_args(["video-to-rig", "walk.mp4"])
     legacy = parser.parse_args(["detect-video", "walk.mp4"])
     infer = parser.parse_args(["infer-rig", "rig-2d.npz"])
+    detector_world = parser.parse_args(["infer-detector-world", "detector-world-3d.npz"])
+    baseline = parser.parse_args(["infer-video-baseline", "walk.mp4"])
 
     assert canonical.handler is command_video_to_rig
     assert legacy.handler is command_video_to_rig
     assert infer.handler is command_infer_rig
+    assert detector_world.handler is command_infer_detector_world
+    assert baseline.handler is command_infer_video_baseline

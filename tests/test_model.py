@@ -24,12 +24,17 @@ def test_small_config_changes_only_model_capacity() -> None:
         "hidden_dim": 384,
         "layers": 6,
     }
-    assert build_model(small).parameter_count == 11_526_300
+    assert build_model(small).parameter_count == 11_708_316
 
 
 def test_forward_and_losses_are_finite_without_training(tmp_path: Path) -> None:
     create_fixture(tmp_path / "synthetic/walk.npz", frames=8, image_feature_dim=32)
-    dataset = MotionWindowDataset(tmp_path, sequence_length=8, stride=8)
+    dataset = MotionWindowDataset(
+        tmp_path,
+        sequence_length=8,
+        stride=8,
+        gravity_view_contract=True,
+    )
     batch = {name: value.unsqueeze(0) for name, value in dataset[0].items()}
     model = GravityViewMotionModel(
         image_feature_dim=32,
@@ -71,7 +76,12 @@ def test_motion_targets_are_fk_consistent_and_reprojection_stays_active(
     tmp_path: Path,
 ) -> None:
     create_fixture(tmp_path / "synthetic/walk.npz", frames=8, image_feature_dim=32)
-    dataset = MotionWindowDataset(tmp_path, sequence_length=8, stride=8)
+    dataset = MotionWindowDataset(
+        tmp_path,
+        sequence_length=8,
+        stride=8,
+        gravity_view_contract=True,
+    )
     batch = {name: value.unsqueeze(0) for name, value in dataset[0].items()}
     prediction_names = (
         "local_rotations_6d",
@@ -137,17 +147,16 @@ def test_zero_image_mask_completely_gates_visual_features(tmp_path: Path) -> Non
 
 def test_held_out_evaluation_is_forward_only_and_reports_motion_metrics(tmp_path: Path) -> None:
     path = create_fixture(tmp_path / "synthetic/walk.npz", frames=16, image_feature_dim=32)
-    dataset = MotionWindowDataset(tmp_path, sequence_length=8, stride=8, paths=[path])
     config = load_config(ROOT / "configs/train-smoke.yaml")
-    model = GravityViewMotionModel(
-        image_feature_dim=32,
-        hidden_dim=64,
-        layers=2,
-        heads=4,
-        mlp_ratio=2,
-        dropout=0,
-        attention_radius=8,
+    dataset = MotionWindowDataset(
+        tmp_path,
+        sequence_length=8,
+        stride=8,
+        paths=[path],
+        gravity_view_contract=True,
+        detector_world_3d=config["data"]["detector_world_3d"],
     )
+    model = build_model(config)
 
     metrics = evaluate_model(model, dataset, config, torch.device("cpu"), use_amp=False)
 

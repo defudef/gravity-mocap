@@ -24,11 +24,15 @@ class MotionWindowDataset(Dataset[dict[str, torch.Tensor]]):
         paths: Sequence[Path] | None = None,
         augmentation: dict[str, Any] | None = None,
         augmentation_seed: int = 0,
+        gravity_view_contract: bool = False,
+        detector_world_3d: dict[str, Any] | None = None,
     ):
         self.root = root
         self.sequence_length = sequence_length
         self.augmentation = dict(augmentation or {})
         self.augmentation_seed = int(augmentation_seed)
+        self.gravity_view_contract = bool(gravity_view_contract)
+        self.detector_world_3d = dict(detector_world_3d or {})
         self.epoch = 0
         self.index: list[tuple[Path, int, int]] = []
         selected_paths = sorted(paths) if paths is not None else sorted(root.rglob("*.npz"))
@@ -70,14 +74,87 @@ class MotionWindowDataset(Dataset[dict[str, torch.Tensor]]):
             result[name] = np.asarray(window, dtype=np.float32).copy()
         result["keypoints_2d_target"] = result["keypoints_2d"].copy()
         result["bbox_target"] = result["bbox"].copy()
+        relative = path.relative_to(self.root)
+        if self.gravity_view_contract:
+            _convert_targets_to_gravity_view(result)
+        generator: np.random.Generator | None = None
         if self.augmentation.get("enabled", False):
-            relative = path.relative_to(self.root)
             digest = hashlib.sha256(
                 f"{self.augmentation_seed}:{self.epoch}:{relative}:{start}".encode()
             ).digest()
             generator = np.random.default_rng(int.from_bytes(digest[:8], "big"))
             _augment_detector_inputs(result, self.augmentation, generator)
+        if self.detector_world_3d.get("enabled", False):
+            if not self.gravity_view_contract:
+                raise ValueError("detector_world_3d requires gravity_view_contract")
+            if generator is None:
+                digest = hashlib.sha256(
+                    f"{self.augmentation_seed}:world3d:{relative}:{start}".encode()
+                ).digest()
+                generator = np.random.default_rng(int.from_bytes(digest[:8], "big"))
+            _create_detector_world_3d_inputs(
+                result,
+                self.detector_world_3d,
+                generator,
+                training=bool(self.augmentation.get("enabled", False)),
+            )
         return {name: torch.from_numpy(value) for name, value in result.items()}
+
+
+def _rotation_6d_to_matrix(value: np.ndarray) -> np.ndarray:
+    first = value[..., :3]
+    second = value[..., 3:]
+    first = first / np.linalg.norm(first, axis=-1, keepdims=True).clip(1e-8)
+    second = second - np.sum(first * second, axis=-1, keepdims=True) * first
+    second = second / np.linalg.norm(second, axis=-1, keepdims=True).clip(1e-8)
+    third = np.cross(first, second)
+    return np.stack((first, second, third), axis=-1).astype(np.float32)
+
+
+def _convert_targets_to_gravity_view(sample: dict[str, np.ndarray]) -> None:
+    """Remove unobservable absolute world yaw from the learned target contract."""
+    local_rotations = sample["local_rotations_6d"].copy()
+    root_world = _rotation_6d_to_matrix(local_rotations[:, 0])
+    gravity_root_6d = sample["gravity_view_orientation_6d"]
+    gravity_root = _rotation_6d_to_matrix(gravity_root_6d)
+    world_to_gravity = gravity_root @ np.swapaxes(root_world, -1, -2)
+    sample["joints_3d"] = np.einsum("tij,tkj->tki", world_to_gravity, sample["joints_3d"]).astype(
+        np.float32
+    )
+    local_rotations[:, 0] = gravity_root_6d
+    sample["local_rotations_6d"] = local_rotations
+
+
+def _create_detector_world_3d_inputs(
+    sample: dict[str, np.ndarray],
+    config: dict[str, Any],
+    generator: np.random.Generator,
+    *,
+    training: bool,
+) -> None:
+    joints = sample["joints_3d"].copy()
+    frame_valid = sample["frame_mask"] > 0
+    confidence = np.repeat(frame_valid[:, None], joints.shape[1], axis=1).astype(np.float32)
+    noise_std = float(config.get("noise_std_meters", 0.0))
+    if noise_std:
+        joints += generator.normal(0.0, noise_std, size=joints.shape).astype(np.float32)
+        joints -= joints[:, :1]
+    confidence_min = float(config.get("confidence_min", 1.0))
+    if confidence_min < 1.0:
+        confidence *= generator.uniform(confidence_min, 1.0, size=confidence.shape).astype(
+            np.float32
+        )
+    if training:
+        dropout = generator.random(confidence.shape) < float(
+            config.get("joint_dropout_probability", 0.0)
+        )
+        dropout &= frame_valid[:, None]
+        joints[dropout] = 0.0
+        confidence[dropout] = 0.0
+    joints[~frame_valid] = 0.0
+    confidence[~frame_valid] = 0.0
+    sample["detector_joints_3d"] = joints.astype(np.float32)
+    sample["detector_3d_confidence"] = confidence
 
 
 def partition_sequence_paths(
@@ -168,7 +245,9 @@ def _augment_detector_inputs(
     dropout &= frame_valid[:, None]
     keypoints[..., :2][dropout] = 0.0
     keypoints[..., 2][dropout] = 0.0
-    keypoints[..., :2] = np.clip(keypoints[..., :2], -2.0, 2.0)
+    # Keep augmented inputs inside the same bbox-relative contract used by the
+    # real detector frontend.  Targets remain untouched in keypoints_2d_target.
+    keypoints[..., :2] = np.clip(keypoints[..., :2], -1.0, 1.0)
 
     bbox = sample["bbox"]
     bbox_jitter = float(config.get("bbox_jitter_std", 0.0))

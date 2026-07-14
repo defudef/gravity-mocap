@@ -4,6 +4,7 @@ import pytest
 from gravity_mocap.pose import (
     fill_short_bbox_gaps,
     mediapipe_to_canonical,
+    mediapipe_world_to_canonical,
     padded_bbox_from_landmarks,
 )
 from gravity_mocap.skeleton import JOINT_NAMES
@@ -36,6 +37,24 @@ def test_mediapipe_mapping_zeros_missing_joint() -> None:
     mapped = mediapipe_to_canonical(points, confidence_threshold=0.2)
 
     assert np.array_equal(mapped[JOINT_NAMES.index("left_toe")], np.zeros(3))
+
+
+def test_mediapipe_world_mapping_is_root_relative_gravity_up() -> None:
+    points = np.zeros((33, 4), dtype=np.float32)
+    points[:, 3] = 0.9
+    for index in range(33):
+        points[index, :3] = [index, index * 2, index * 3]
+
+    joints, confidence = mediapipe_world_to_canonical(points)
+    by_name = {name: joints[index] for index, name in enumerate(JOINT_NAMES)}
+
+    assert joints.shape == (22, 3)
+    assert confidence.shape == (22,)
+    assert np.array_equal(by_name["root"], np.zeros(3, dtype=np.float32))
+    expected_left_hip = points[23, :3] - 0.5 * (points[23, :3] + points[24, :3])
+    expected_left_hip[1:] *= -1
+    assert np.allclose(by_name["left_hip"], expected_left_hip)
+    assert np.allclose(confidence, 0.9)
 
 
 def test_bbox_uses_visible_landmarks_and_padding() -> None:

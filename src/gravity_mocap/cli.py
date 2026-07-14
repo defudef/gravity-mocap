@@ -8,6 +8,7 @@ from pathlib import Path
 
 import torch
 
+from .baseline import infer_detector_baseline
 from .catalog import DatasetCatalog
 from .data import MotionWindowDataset
 from .download import describe, download_dataset
@@ -34,7 +35,7 @@ DEFAULT_DATA_ROOT = (
 DEFAULT_RAW = DEFAULT_DATA_ROOT / "raw"
 DEFAULT_PROCESSED = DEFAULT_DATA_ROOT / "processed"
 DEFAULT_FIXTURE = DEFAULT_DATA_ROOT / "fixtures/synthetic/walk.npz"
-DEFAULT_INFERENCE_CHECKPOINT = DEFAULT_DATA_ROOT / "runs/motion-small/best.pt"
+DEFAULT_INFERENCE_CHECKPOINT = DEFAULT_DATA_ROOT / "runs/motion-small-v2/best.pt"
 
 
 def _catalog(path: str) -> DatasetCatalog:
@@ -86,6 +87,17 @@ def command_download(args: argparse.Namespace) -> int:
 
 def command_preprocess(args: argparse.Namespace) -> int:
     catalog = _catalog(args.catalog)
+    config = load_config(args.config) if args.config is not None else None
+    image_feature_dim = (
+        args.image_feature_dim
+        if args.image_feature_dim is not None
+        else int(config["model"]["image_feature_dim"] if config is not None else 512)
+    )
+    target_fps = (
+        args.target_fps
+        if args.target_fps is not None
+        else float(config["data"]["target_fps"] if config is not None else 30.0)
+    )
     entries = (
         [catalog.require_approved(dataset_id) for dataset_id in args.dataset]
         if args.dataset
@@ -98,8 +110,8 @@ def command_preprocess(args: argparse.Namespace) -> int:
             entry,
             args.raw_root,
             args.output_root,
-            image_feature_dim=args.image_feature_dim,
-            target_fps=args.target_fps,
+            image_feature_dim=image_feature_dim,
+            target_fps=target_fps,
             camera_config=camera_config,
             limit=args.limit,
         )
@@ -128,6 +140,10 @@ def command_validate(args: argparse.Namespace) -> int:
         Path(config["data"]["root"]),
         int(config["data"]["sequence_length"]),
         int(config["data"]["stride"]),
+        augmentation=config["data"]["augmentation"],
+        augmentation_seed=int(config["seed"]),
+        gravity_view_contract=bool(config["data"]["gravity_view_contract"]),
+        detector_world_3d=config["data"]["detector_world_3d"],
     )
     batch = {name: value.unsqueeze(0) for name, value in dataset[0].items()}
     model = build_model(config).eval()
@@ -258,12 +274,43 @@ def command_infer_video(args: argparse.Namespace) -> int:
         args.checkpoint,
         output,
         source_video=args.video,
+        detector_world_3d_path=Path(rig["detector_world_3d"]),
         device_name=args.device,
         force=args.force,
         preview=not args.no_preview,
     )
     result["rig_2d_status"] = rig["status"]
     result["detector_status"] = rig["status"]
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def command_infer_video_baseline(args: argparse.Namespace) -> int:
+    output = _video_output(args)
+    detection = video_to_rig(
+        args.video,
+        output,
+        data_root=DEFAULT_DATA_ROOT,
+        target_fps=args.target_fps,
+        confidence_threshold=args.confidence_threshold,
+        bbox_padding=args.bbox_padding,
+        max_missing_frames=args.max_missing_frames,
+        max_frames=args.max_frames,
+        force=args.force,
+        preview=not args.no_preview,
+    )
+    result = infer_detector_baseline(
+        Path(detection["detector_world_3d"]),
+        output,
+        rig_2d_path=Path(detection["rig_2d"]),
+        source_video=args.video,
+        smoothing_window=args.smoothing_window,
+        force=args.force,
+        preview=not args.no_preview,
+    )
+    result["detector_status"] = detection["status"]
+    result["rig_2d"] = detection["rig_2d"]
+    result["detector_world_3d"] = detection["detector_world_3d"]
     print(json.dumps(result, indent=2))
     return 0
 
@@ -275,9 +322,26 @@ def command_infer_rig(args: argparse.Namespace) -> int:
         args.checkpoint,
         output,
         source_video=args.source_video,
+        detector_world_3d_path=args.detector_world_3d,
         device_name=args.device,
         force=args.force,
         preview=args.source_video is not None and not args.no_preview,
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def command_infer_detector_world(args: argparse.Namespace) -> int:
+    output = args.output or args.detector_world_3d.expanduser().resolve().parent
+    preview = args.source_video is not None and args.rig_2d is not None and not args.no_preview
+    result = infer_detector_baseline(
+        args.detector_world_3d,
+        output,
+        rig_2d_path=args.rig_2d,
+        source_video=args.source_video,
+        smoothing_window=args.smoothing_window,
+        force=args.force,
+        preview=preview,
     )
     print(json.dumps(result, indent=2))
     return 0
@@ -321,8 +385,13 @@ def build_parser() -> argparse.ArgumentParser:
     preprocess.add_argument("--dataset", action="append", default=[])
     preprocess.add_argument("--raw-root", type=Path, default=DEFAULT_RAW)
     preprocess.add_argument("--output-root", type=Path, default=DEFAULT_PROCESSED)
-    preprocess.add_argument("--image-feature-dim", type=int, default=512)
-    preprocess.add_argument("--target-fps", type=float, default=30.0)
+    preprocess.add_argument(
+        "--config",
+        type=Path,
+        help="Use model.image_feature_dim and data.target_fps as preprocessing defaults",
+    )
+    preprocess.add_argument("--image-feature-dim", type=int)
+    preprocess.add_argument("--target-fps", type=float)
     preprocess.add_argument("--limit", type=int)
     preprocess.set_defaults(handler=command_preprocess)
 
@@ -412,10 +481,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional matching source video; when provided, render the motion preview",
     )
     infer_rig_parser.add_argument("--checkpoint", type=Path, default=DEFAULT_INFERENCE_CHECKPOINT)
+    infer_rig_parser.add_argument(
+        "--detector-world-3d",
+        type=Path,
+        help="Required detector prior for v2 checkpoints",
+    )
     infer_rig_parser.add_argument("--device", default="auto", help="auto, cpu, mps, or cuda")
     infer_rig_parser.add_argument("--force", action="store_true")
     infer_rig_parser.add_argument("--no-preview", action="store_true")
     infer_rig_parser.set_defaults(handler=command_infer_rig)
+
+    infer_world_parser = subparsers.add_parser(
+        "infer-detector-world",
+        help="Retarget detector world 3D to neutral motion without a learned checkpoint",
+    )
+    infer_world_parser.add_argument("detector_world_3d", type=Path)
+    infer_world_parser.add_argument("--rig-2d", type=Path)
+    infer_world_parser.add_argument("--source-video", type=Path)
+    infer_world_parser.add_argument("--output", type=Path)
+    infer_world_parser.add_argument("--smoothing-window", type=int, default=5)
+    infer_world_parser.add_argument("--force", action="store_true")
+    infer_world_parser.add_argument("--no-preview", action="store_true")
+    infer_world_parser.set_defaults(handler=command_infer_detector_world)
 
     infer = subparsers.add_parser(
         "infer-video", help="Run video -> 2D skeleton -> clean-room 3D motion"
@@ -424,6 +511,14 @@ def build_parser() -> argparse.ArgumentParser:
     infer.add_argument("--checkpoint", type=Path, default=DEFAULT_INFERENCE_CHECKPOINT)
     infer.add_argument("--device", default="auto", help="auto, cpu, mps, or cuda")
     infer.set_defaults(handler=command_infer_video)
+
+    baseline = subparsers.add_parser(
+        "infer-video-baseline",
+        help="Run video -> detector world 3D -> neutral motion without training",
+    )
+    _add_video_arguments(baseline)
+    baseline.add_argument("--smoothing-window", type=int, default=5)
+    baseline.set_defaults(handler=command_infer_video_baseline)
     return parser
 
 

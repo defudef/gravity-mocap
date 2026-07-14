@@ -22,6 +22,7 @@ from .rotations import (
 from .schema import stable_hash
 from .skeleton import SKELETON
 from .video import _sampled_frames, _video_dependencies, file_sha256
+from .world3d import load_detector_world_3d, prepare_detector_world_3d
 
 INFERENCE_VERSION = 2
 
@@ -83,7 +84,9 @@ def _blend_predictions(
     frame_count = len(inputs["frame_mask"])
     starts = window_starts(frame_count, sequence_length, stride)
     weights = np.hanning(sequence_length + 2)[1:-1].astype(np.float32)
-    input_names = ("bbox", "keypoints_2d", "image_features", "image_mask", "camera_delta_6d")
+    input_names = ["bbox", "keypoints_2d", "image_features", "image_mask", "camera_delta_6d"]
+    if model.use_detector_world_3d:
+        input_names.extend(("detector_joints_3d", "detector_3d_confidence"))
     sums: dict[str, torch.Tensor] = {}
     weight_sum = torch.zeros(frame_count, dtype=torch.float32, device=device)
 
@@ -201,6 +204,7 @@ def infer_rig(
     output_dir: Path,
     *,
     source_video: Path | None = None,
+    detector_world_3d_path: Path | None = None,
     device_name: str = "auto",
     force: bool = False,
     preview: bool = False,
@@ -209,6 +213,11 @@ def infer_rig(
     rig_2d_path = rig_2d_path.expanduser().resolve()
     checkpoint_path = checkpoint_path.expanduser().resolve()
     video = source_video.expanduser().resolve() if source_video is not None else None
+    world_3d_path = (
+        detector_world_3d_path.expanduser().resolve()
+        if detector_world_3d_path is not None
+        else None
+    )
     if preview and video is None:
         raise ValueError("A source video is required to render the 3D motion preview")
     if video is not None and not video.is_file():
@@ -223,6 +232,26 @@ def infer_rig(
     model, config, checkpoint = load_inference_checkpoint(checkpoint_path, device)
     image_feature_dim = int(config["model"]["image_feature_dim"])
     inputs = rig.model_inputs(image_feature_dim)
+    world_3d = None
+    if model.use_detector_world_3d:
+        if world_3d_path is None:
+            raise ValueError(
+                "This checkpoint requires a detector world-3D artifact; pass --detector-world-3d"
+            )
+        world_3d = load_detector_world_3d(world_3d_path)
+        if world_3d.frames != rig.frames:
+            raise ValueError("2D rig and detector world-3D frame counts do not match")
+        if not np.array_equal(world_3d.source_frame_indices, rig.source_frame_indices):
+            raise ValueError("2D rig and detector world-3D source frame indices do not match")
+        if not np.isclose(world_3d.fps, rig.fps):
+            raise ValueError("2D rig and detector world-3D FPS do not match")
+        rig_source_hash = rig.provenance.get("source_sha256")
+        world_source_hash = world_3d.provenance.get("source_sha256")
+        if rig_source_hash and world_source_hash and rig_source_hash != world_source_hash:
+            raise ValueError("2D rig and detector world-3D source provenance do not match")
+        detector_joints, detector_confidence, _, _ = prepare_detector_world_3d(world_3d)
+        inputs["detector_joints_3d"] = detector_joints
+        inputs["detector_3d_confidence"] = detector_confidence.astype(np.float32)
     sequence_length = int(config["data"]["sequence_length"])
     stride = int(config["data"]["stride"])
     fps = rig.fps
@@ -233,6 +262,9 @@ def infer_rig(
         "inference_version": INFERENCE_VERSION,
         "rig_2d_sha256": rig_digest,
         "rig_2d_request_hash": rig.provenance.get("request_hash"),
+        "detector_world_3d_sha256": (
+            file_sha256(world_3d_path) if world_3d_path is not None else None
+        ),
         "checkpoint_sha256": checkpoint_digest,
         "checkpoint_version": CHECKPOINT_VERSION,
         "sequence_length": sequence_length,
@@ -306,6 +338,8 @@ def infer_rig(
         "request_hash": request_hash,
         "rig_2d": str(rig_2d_path),
         "rig_2d_provenance": rig.provenance,
+        "detector_world_3d": str(world_3d_path) if world_3d_path is not None else None,
+        "detector_world_3d_provenance": world_3d.provenance if world_3d is not None else None,
         "checkpoint": str(checkpoint_path),
         "checkpoint_compatibility_hash": checkpoint.get("compatibility_hash"),
         "checkpoint_data_bom_hash": checkpoint.get("data_bom_hash"),

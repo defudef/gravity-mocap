@@ -236,8 +236,10 @@ Create only the standalone 2D rig:
 ```
 
 This command stops after the deterministic frontend. It does not load a Gravity
-Mocap checkpoint or run 3D inference. `detect-video` remains an alias for
-backward compatibility.
+Mocap checkpoint or run learned 3D inference. `detect-video` remains an alias
+for backward compatibility. The 2D rig stays independently loadable; the same
+detector pass also preserves MediaPipe's metric world landmarks as a separate
+sidecar instead of discarding them.
 
 The API boundary is equally explicit:
 
@@ -260,6 +262,9 @@ creates:
 - `rig-2d-manifest.json`: source bytes, detector model URL/size/SHA-256, mapping
   version, parameters, frame selection, dimensions, FPS, and joint order;
 - `preview-rig-2d.mp4`: the detected neutral skeleton over the source video.
+- `detector-world-3d.npz`: separate root-relative 33-to-22 mapped detector
+  landmarks, confidence, metric units, frame mask, source indices, and full
+  source/model provenance.
 
 The NPZ contains pixel-space keypoints for inspection and bbox-relative
 keypoints in `[-1, 1]` for the motion model. Its bbox is frame-relative
@@ -267,7 +272,31 @@ keypoints in `[-1, 1]` for the motion model. Its bbox is frame-relative
 loader validates finite values and the exact neutral joint order and rejects
 any SMPL/SMPL-X/body-model fields.
 
-## Neutral 2D rig -> Gravity Mocap 3D
+## Detector-world baseline without training
+
+Produce a neutral, fixed-bone-length 22-joint motion immediately, without a
+checkpoint:
+
+```sh
+./scripts/video.sh infer-video-baseline path/to/reference.mp4
+```
+
+This writes `detector-baseline-motion.npz`,
+`detector-baseline-manifest.json`, and `preview-detector-baseline.mp4`. Short
+world-landmark gaps are interpolated under the same fail-closed gap limit,
+confidence-weighted temporal smoothing is applied, and the result is retargeted
+to the repository's neutral skeleton. This is a local-pose baseline: root
+translation is intentionally stationary until a learned world-grounding model
+predicts it.
+
+The standalone artifact boundary is also available without rerunning detection:
+
+```sh
+./scripts/video.sh infer-detector-world \
+  Saved/GravityMocap/inference/<video-id>/detector-world-3d.npz
+```
+
+## Neutral detector artifacts -> learned Gravity Mocap 3D
 
 Run 3D recovery from an already-created rig without rerunning the detector or
 requiring the source video:
@@ -275,7 +304,9 @@ requiring the source video:
 ```sh
 ./scripts/video.sh infer-rig \
   Saved/GravityMocap/inference/<video-id>/rig-2d.npz \
-  --checkpoint Saved/GravityMocap/runs/motion-small/best.pt
+  --detector-world-3d \
+    Saved/GravityMocap/inference/<video-id>/detector-world-3d.npz \
+  --checkpoint Saved/GravityMocap/runs/motion-small-v2/best.pt
 ```
 
 Add `--source-video path/to/reference.mp4` to render `preview-motion.mp4`; the
@@ -292,7 +323,7 @@ For convenience, the composed command still runs both stages:
 
 ```sh
 ./scripts/video.sh infer-video path/to/reference.mp4 \
-  --checkpoint Saved/GravityMocap/runs/motion-small/best.pt
+  --checkpoint Saved/GravityMocap/runs/motion-small-v2/best.pt
 ```
 
 The operation is idempotent: unchanged source bytes, model, checkpoint, and
@@ -303,10 +334,15 @@ currently represented by identity camera deltas. `image_mask` gates only the
 optional learned crop features; 2D keypoints and their camera-aware reprojection
 loss remain active for motion-only training.
 
-Checkpoint version 4 is the first version trained against the FK-consistent,
-auto-framed rig and stable frame-relative reprojection contract. Version 2 and
-3 checkpoints are rejected by training resume and inference instead of silently
-producing misleading output.
+Checkpoint version 5 introduces the Gravity-View target contract and the
+detector-world prior. Absolute world yaw is no longer used as a target that
+cannot be identified from monocular observations. Version 4 and older
+checkpoints are rejected by training resume and learned inference instead of
+silently mixing incompatible coordinate systems. The no-checkpoint detector
+baseline remains available independently. The current converter-v4/v5 shard
+inventory remains valid: Gravity-View targets and the synthetic detector-world
+prior are derived deterministically by the loader, so this checkpoint change
+does not require another shard rebuild.
 This repository still ships no trained weights, so a new checkpoint must be
 trained from regenerated shards before the 3D stage is representative. The 2D
 rig frontend does not require that checkpoint and remains usable independently.
@@ -317,13 +353,13 @@ adjust `--max-missing-frames` only after checking `preview-rig-2d.mp4`. A clean 
 preview does not guarantee a good 3D result: that also depends on the capacity
 and training state of the chosen Gravity Mocap checkpoint.
 
-The motion model does not require a particular detector. A frontend maps its
-output to the canonical 22-joint order from `src/gravity_mocap/skeleton.py`,
-then supplies one `[x, y, confidence]` row per joint. `x/y` are normalized to
+The v2 motion model consumes both canonical 2D rows and the separately
+provenanced detector-world prior. The 2D `x/y` coordinates are normalized to
 `[-1, 1]` within the person's bbox; the bbox itself is `[x1, y1, x2, y2]`
-normalized to the full frame's `[-1, 1]` coordinates. The
-`normalize_detector_inputs` helper converts pixel values to this contract.
-Missing joints use confidence `0` and zero coordinates.
+normalized to the full frame's `[-1, 1]` coordinates. World landmarks are
+converted with `[x, -y, -z]`, confidence-weighted, smoothed, and retargeted to
+the same fixed neutral skeleton before entering the model. Missing values keep
+confidence `0`; long frame gaps fail closed.
 
 The training loader deterministically degrades clean projected keypoints per
 epoch to resemble a real detector. Because its random seed is derived from the
@@ -372,19 +408,29 @@ and may also replace `keypoints_2d` and `bbox`.
 
 ## Start motion training yourself
 
-### Smaller 11.5M-parameter baseline
+### Smaller 11.7M-parameter v2 baseline
 
 The recommended model for the current approximately 31--32 hour `core` corpus
 keeps the paper config's dataset, seed,
 split, augmentations, optimizer, validation, and early stopping unchanged. It
-changes only the Transformer from 12x512 (39.3M parameters) to 6x384 (11.5M)
-and writes to an isolated `Saved/GravityMocap/runs/motion-small/` output.
+changes only the Transformer from 12x512 (39.6M parameters) to 6x384 (11.7M)
+and writes to an isolated `Saved/GravityMocap/runs/motion-small-v2/` output.
+The old `motion-small/` version-4 checkpoints remain untouched but cannot be
+resumed into the v2 contract.
 
 Preview and then start its first three-epoch session:
 
 ```sh
 ./scripts/train-small.sh --max-epochs 3 --resume never
 ./scripts/train-small.sh --execute --max-epochs 3 --resume never
+```
+
+The isolated three-epoch canary has a dedicated wrapper and is also dry-run by
+default:
+
+```sh
+./scripts/train-v2-canary.sh
+./scripts/train-v2-canary.sh --execute
 ```
 
 Resume the same small-model run later without `--resume never`:

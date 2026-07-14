@@ -21,8 +21,8 @@ use obligations with whoever owns release compliance.
 
 Neither SMPL nor SMPL-X is used. The model predicts a neutral 22-joint tree:
 pelvis/root, three spine joints, neck/head, clavicles, shoulders, elbows,
-wrists, hips, knees, ankles, and toes. Per-frame outputs are local 6D joint
-rotations, camera-frame orientation, Gravity-View orientation, local root
+wrists, hips, knees, ankles, and toes. Per-frame outputs are Gravity-View local
+6D joint rotations, camera-frame orientation, local root
 velocity, weak camera, and six stationary probabilities (hands, toes, heels).
 
 The deliberate difference from the paper is removal of body shape and vertex
@@ -31,12 +31,13 @@ smoothness, contacts, root velocity, and orientation losses remain.
 
 ## Architecture
 
-Each frame fuses four independently projected inputs by element-wise addition:
+Each frame fuses five independently projected inputs by element-wise addition:
 
 1. bounding box;
 2. 22 normalized 2D keypoints plus confidence;
 3. 512-dimensional clean visual features;
 4. relative camera rotation in 6D form.
+5. confidence-bearing detector world 3D retargeted to the neutral skeleton.
 
 The production config uses 12 relative Transformer blocks, 8 attention heads,
 512 hidden dimensions, RoPE, and a receptive-field attention mask. Motion-only
@@ -55,8 +56,13 @@ uses CUDA mixed precision, all visible
 CUDA devices through `DataParallel`, micro-batches of 16, and 16-step gradient
 accumulation for an effective batch of 256; CPU/MPS remain valid slower paths.
 
-The paper config treats a permissively licensed 2D pose estimator as a
-replaceable frontend. Clean projected points are corrupted deterministically
+Checkpoint contract v5 removes unobservable absolute world yaw from the target:
+the root rotation and FK joint target live in Gravity-View coordinates. The
+same audited MediaPipe bundle also provides metric world landmarks; these are
+stored in a separate inference artifact and become a noisy neutralized prior,
+while the learned model focuses on residual pose, root motion, camera relation,
+and contacts. Clean projected points and synthetic detector-world priors are
+corrupted deterministically
 with coordinate noise, confidence degradation, missing joints/frames,
 contiguous occlusion, bbox jitter, and whole-window camera-input dropout. The
 seed includes epoch, sequence path, and window start, so exact mid-epoch resume
@@ -133,9 +139,11 @@ source hashes, converter version, and preprocessing hash match the current
 input; stale or interrupted outputs are regenerated. The current converter
 records both source FPS and canonical 30 FPS. The training audit also rejects a
 converter version older than the current auto-framed target contract. Such a
-corpus is therefore regenerated automatically by preprocessing, and checkpoint
-versions 2 and 3 cannot be resumed or used for inference; version 4 requires a
-fresh run on the regenerated shards.
+corpus is therefore regenerated automatically by preprocessing. Checkpoint
+versions 2 and 3 remain obsolete, and version 4 is isolated as the former
+2D-only/absolute-root contract. Version 5 requires a fresh run but derives its
+Gravity-View targets and synthetic detector-world prior from the current valid
+shards at load time, so the v4 shard inventory itself does not need rebuilding.
 
 CMU's archive host currently serves an incomplete TLS chain. Downloads attempt
 HTTPS normally. Only an SSL chain failure may select the configured HTTP URL,
@@ -160,10 +168,10 @@ automation—starts the paper-size motion training:
 For the current approximately 31--32 hour `core` corpus, the recommended model
 is the smaller capacity baseline. Use the dedicated wrapper. It
 selects `configs/train-small.yaml` and the isolated
-`Saved/GravityMocap/runs/motion-small/` output while preserving the production
+`Saved/GravityMocap/runs/motion-small-v2/` output while preserving the production
 data, seed, split, augmentation, optimizer, validation, and early-stopping
-settings. Only model capacity changes from 12x512 (39.3M parameters) to 6x384
-(11.5M parameters):
+settings. Only model capacity changes from 12x512 (39.6M parameters) to 6x384
+(11.7M parameters):
 
 ```sh
 ./scripts/train-small.sh --max-epochs 3 --resume never
@@ -175,9 +183,13 @@ Subsequent sessions resume with
 configuration at the paper model's output because their checkpoints are
 intentionally incompatible.
 
+Version-4 `motion-small/` checkpoints remain isolated and cannot resume into
+the Gravity-View/detector-prior v5 job. Use `scripts/train-v2-canary.sh` for an
+isolated three-epoch dry-run/execute canary before starting the full v2 output.
+
 The capacity calculation is in `docs/model-capacity.md`. In short, current
 `core` yields roughly 53--54 thousand 4-second training windows after the 5%
-holdout. That supports the 6x384, 11.5M-parameter model; the 12x512, 39.3M model
+holdout. That supports the 6x384, 11.7M-parameter model; the 12x512, 39.6M model
 is retained as an explicit scaling experiment, not the default recommendation.
 
 For repeatable overnight sessions:

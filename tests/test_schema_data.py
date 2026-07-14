@@ -107,8 +107,37 @@ def test_detector_augmentation_is_deterministic_and_preserves_clean_target(
     assert not np.array_equal(first["keypoints_2d"], first["keypoints_2d_target"])
     assert np.array_equal(first["bbox_target"], clean["bbox"][:8])
     assert not np.array_equal(first["bbox"], first["bbox_target"])
+    assert np.max(np.abs(first["keypoints_2d"][..., :2].numpy())) <= 1.0
     identity = np.asarray([1, 0, 0, 0, 1, 0], dtype=np.float32)
     assert np.allclose(first["camera_delta_6d"], identity)
+
+
+def test_gravity_view_contract_adds_deterministic_world_3d_prior(tmp_path: Path) -> None:
+    path = create_fixture(tmp_path / "synthetic/walk.npz", frames=16, image_feature_dim=32)
+    detector_world = {
+        "enabled": True,
+        "noise_std_meters": 0.02,
+        "confidence_min": 0.5,
+        "joint_dropout_probability": 0.05,
+    }
+    dataset = MotionWindowDataset(
+        tmp_path,
+        sequence_length=8,
+        stride=8,
+        paths=[path],
+        gravity_view_contract=True,
+        detector_world_3d=detector_world,
+        augmentation_seed=123,
+    )
+
+    first = dataset[0]
+    repeated = dataset[0]
+
+    assert first["detector_joints_3d"].shape == (8, 22, 3)
+    assert first["detector_3d_confidence"].shape == (8, 22)
+    assert np.array_equal(first["detector_joints_3d"], repeated["detector_joints_3d"])
+    assert np.allclose(first["local_rotations_6d"][:, 0], first["gravity_view_orientation_6d"])
+    assert np.allclose(first["joints_3d"][:, 0], 0)
 
 
 def test_detector_pixel_contract_normalizes_bbox_and_22_keypoints() -> None:

@@ -43,12 +43,12 @@ the raw frame count alone.
 
 ## Recommendation
 
-Use the existing **6 layers x 384 hidden, 11,526,300 parameter** model in
+Use the existing **6 layers x 384 hidden, 11,708,316 parameter** model in
 `configs/train-small.yaml` for the current `core` corpus. It is large enough for
 the 22-joint temporal mapping while leaving a sensible regularization margin
 for roughly 47.8k training clips.
 
-Do not use the 12x512, 39,263,388-parameter paper-size configuration as the
+Do not use the 12x512, 39,571,612-parameter paper-size configuration as the
 default for this corpus. It has 3.4 times as many parameters without 3.4 times
 as much independent motion, so it is a scaling experiment with a materially
 higher overfitting risk. Early stopping protects a run, but does not make an
@@ -56,12 +56,12 @@ oversized model compute-efficient.
 
 If the full 71.47 hours of AddBiomechanics are later ingested, the combined
 corpus becomes approximately 99.87 hours, 10.79M 30 FPS frames, and 180k
-overlapping windows. The next justified capacity is **8x384, 15,075,228
-parameters**. Move to 39.3M only if a controlled capacity sweep shows
-11.5M and 15.1M both underfit: train and validation losses should still fall
+overlapping windows. The next justified capacity is **8x384, 15,257,244
+parameters**. Move to 39.6M only if a controlled capacity sweep shows
+11.7M and 15.3M both underfit: train and validation losses should still fall
 together, with no widening generalization gap and improved held-out motion
 metrics.
 
-The practical sweep is therefore 11.5M first, then 15.1M on the same seed,
+The practical sweep is therefore 11.7M first, then 15.3M on the same seed,
 split, augmentation, optimizer, and early-stopping settings. Dataset diversity
-should be expanded before testing 39.3M.
+should be expanded before testing 39.6M.

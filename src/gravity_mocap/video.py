@@ -13,7 +13,12 @@ import numpy as np
 
 from .artifacts import write_json_atomic
 from .detector import normalize_detector_inputs
-from .pose import fill_short_bbox_gaps, mediapipe_to_canonical, padded_bbox_from_landmarks
+from .pose import (
+    fill_short_bbox_gaps,
+    mediapipe_to_canonical,
+    mediapipe_world_to_canonical,
+    padded_bbox_from_landmarks,
+)
 from .rig2d import (
     RIG_2D_FILENAME,
     RIG_2D_MANIFEST_FILENAME,
@@ -26,6 +31,13 @@ from .rig2d import (
 from .rotations import identity_rotation_6d
 from .schema import stable_hash
 from .skeleton import SKELETON
+from .world3d import (
+    DETECTOR_WORLD_3D_FILENAME,
+    DETECTOR_WORLD_3D_VERSION,
+    DetectorWorld3D,
+    load_detector_world_3d,
+    write_detector_world_3d,
+)
 
 POSE_BACKEND = "mediapipe-pose-landmarker-heavy"
 POSE_MODEL_URL = (
@@ -235,6 +247,7 @@ def video_to_rig(
     source_digest = file_sha256(video)
     request = {
         "rig_2d_version": RIG_2D_VERSION,
+        "detector_world_3d_version": DETECTOR_WORLD_3D_VERSION,
         "source_sha256": source_digest,
         "backend": POSE_BACKEND,
         "model_sha256": POSE_MODEL_SHA256,
@@ -247,20 +260,26 @@ def video_to_rig(
     request_hash = stable_hash(request)
     output_dir = output_dir.expanduser().resolve()
     rig_path = output_dir / RIG_2D_FILENAME
+    world_3d_path = output_dir / DETECTOR_WORLD_3D_FILENAME
     manifest_path = output_dir / RIG_2D_MANIFEST_FILENAME
     preview_path = output_dir / RIG_2D_PREVIEW_FILENAME
     if not force and rig_path.is_file() and manifest_path.is_file():
         try:
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if manifest.get("request_hash") == request_hash and (
-                not preview or preview_path.is_file()
+            if (
+                manifest.get("request_hash") == request_hash
+                and (not preview or preview_path.is_file())
+                and world_3d_path.is_file()
             ):
                 cached_rig = load_rig_2d(rig_path)
+                cached_world_3d = load_detector_world_3d(world_3d_path)
                 return {
                     "status": "cached",
                     "frames": cached_rig.frames,
+                    "detector_world_3d_frames": int(cached_world_3d.frame_mask.sum()),
                     "rig_2d": str(rig_path),
                     "detector_inputs": str(rig_path),
+                    "detector_world_3d": str(world_3d_path),
                     "manifest": str(manifest_path),
                     "preview": str(preview_path) if preview_path.is_file() else None,
                 }
@@ -279,6 +298,9 @@ def video_to_rig(
         output_segmentation_masks=False,
     )
     keypoints = np.zeros((len(indices), SKELETON.joint_count, 3), dtype=np.float32)
+    world_joints = np.zeros((len(indices), SKELETON.joint_count, 3), dtype=np.float32)
+    world_confidence = np.zeros((len(indices), SKELETON.joint_count), dtype=np.float32)
+    world_frame_mask = np.zeros(len(indices), dtype=np.float32)
     raw_bboxes = np.full((len(indices), 4), np.nan, dtype=np.float32)
     detected_frames = 0
     with vision.PoseLandmarker.create_from_options(options) as landmarker:
@@ -305,6 +327,24 @@ def video_to_rig(
             keypoints[output_index] = mediapipe_to_canonical(
                 landmarks, confidence_threshold=confidence_threshold
             )
+            if result.pose_world_landmarks:
+                world_landmarks = np.asarray(
+                    [
+                        [
+                            landmark.x,
+                            landmark.y,
+                            landmark.z,
+                            min(float(landmark.visibility), float(landmark.presence)),
+                        ]
+                        for landmark in result.pose_world_landmarks[0]
+                    ],
+                    dtype=np.float32,
+                )
+                (
+                    world_joints[output_index],
+                    world_confidence[output_index],
+                ) = mediapipe_world_to_canonical(world_landmarks)
+                world_frame_mask[output_index] = 1.0
             bbox = padded_bbox_from_landmarks(
                 landmarks,
                 frame_width=width,
@@ -356,6 +396,34 @@ def video_to_rig(
             provenance=provenance,
         ),
     )
+    world_3d_provenance = {
+        **request,
+        "artifact_type": "gravity-mocap-detector-world-3d",
+        "request_hash": request_hash,
+        "source_path": str(video),
+        "source_fps": source_fps,
+        "source_frame_count": source_frame_count,
+        "output_frames": len(indices),
+        "detected_frames": int(world_frame_mask.sum()),
+        "coordinate_transform": ["x", "-y", "-z"],
+        "coordinate_units": "metres",
+        "joint_names": list(SKELETON.names),
+        "model_url": POSE_MODEL_URL,
+        "model_size": POSE_MODEL_SIZE,
+        "license": "Apache-2.0",
+    }
+    write_detector_world_3d(
+        world_3d_path,
+        DetectorWorld3D(
+            joints_3d=world_joints,
+            confidence=world_confidence,
+            frame_mask=world_frame_mask,
+            source_frame_indices=indices,
+            fps=target_fps,
+            source_fps=source_fps,
+            provenance=world_3d_provenance,
+        ),
+    )
     if preview:
         output_dir.mkdir(parents=True, exist_ok=True)
         _render_pose_preview(video, indices, keypoints, bboxes, preview_path, target_fps)
@@ -364,6 +432,7 @@ def video_to_rig(
         "frames": len(indices),
         "rig_2d": str(rig_path),
         "detector_inputs": str(rig_path),
+        "detector_world_3d": str(world_3d_path),
         "preview": str(preview_path) if preview else None,
     }
     write_json_atomic(manifest_path, manifest)
@@ -371,8 +440,10 @@ def video_to_rig(
         "status": "created",
         "frames": len(indices),
         "detected_frames": detected_frames,
+        "detector_world_3d_frames": int(world_frame_mask.sum()),
         "rig_2d": str(rig_path),
         "detector_inputs": str(rig_path),
+        "detector_world_3d": str(world_3d_path),
         "manifest": str(manifest_path),
         "preview": str(preview_path) if preview else None,
     }

@@ -4,6 +4,12 @@ data:
   root: ../Saved/GravityMocap/fixtures
   allow_synthetic: true
   target_fps: 30
+  gravity_view_contract: true
+  detector_world_3d:
+    enabled: true
+    noise_std_meters: 0.02
+    confidence_min: 0.5
+    joint_dropout_probability: 0.05
   validation_fraction: 0.0
   split_seed: 7331
   sequence_length: 8
@@ -30,6 +36,7 @@ model:
   mlp_ratio: 2
   dropout: 0.0
   attention_radius: 8
+  use_detector_world_3d: true
 train:
   batch_size: 2
   gradient_accumulation_steps: 1

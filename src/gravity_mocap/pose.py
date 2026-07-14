@@ -7,6 +7,41 @@ from .skeleton import SKELETON
 MEDIAPIPE_LANDMARK_COUNT = 33
 
 
+def _canonical_landmark_values(points: np.ndarray) -> dict[str, np.ndarray]:
+    """Build the neutral 22-joint topology from MediaPipe's 33 landmarks."""
+    left_shoulder = points[11]
+    right_shoulder = points[12]
+    left_hip = points[23]
+    right_hip = points[24]
+    root = 0.5 * (left_hip + right_hip)
+    neck = 0.5 * (left_shoulder + right_shoulder)
+    head = 0.5 * (points[7] + points[8])
+    return {
+        "root": root,
+        "left_hip": left_hip,
+        "right_hip": right_hip,
+        "spine_1": root + (neck - root) * 0.25,
+        "left_knee": points[25],
+        "right_knee": points[26],
+        "spine_2": root + (neck - root) * 0.50,
+        "left_ankle": points[27],
+        "right_ankle": points[28],
+        "spine_3": root + (neck - root) * 0.75,
+        "left_toe": points[31],
+        "right_toe": points[32],
+        "neck": neck,
+        "left_clavicle": neck + (left_shoulder - neck) * 0.30,
+        "right_clavicle": neck + (right_shoulder - neck) * 0.30,
+        "head": head,
+        "left_shoulder": left_shoulder,
+        "right_shoulder": right_shoulder,
+        "left_elbow": points[13],
+        "right_elbow": points[14],
+        "left_wrist": points[15],
+        "right_wrist": points[16],
+    }
+
+
 def _present(point: np.ndarray, threshold: float) -> bool:
     return bool(np.isfinite(point).all() and point[2] >= threshold)
 
@@ -96,6 +131,37 @@ def mediapipe_to_canonical(
         result[index] = values[name]
     result[result[:, 2] <= 0] = 0.0
     return result
+
+
+def mediapipe_world_to_canonical(
+    landmarks_xyzc: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Map MediaPipe world landmarks to root-relative, gravity-up neutral joints.
+
+    MediaPipe exposes metric ``x, y, z`` values plus visibility/presence.  The
+    detector coordinate transform ``[x, -y, -z]`` keeps the basis right-handed
+    while making gravity point along positive Y.  Confidence is preserved as a
+    separate array instead of deleting useful detector estimates for occluded
+    limbs.
+    """
+    points = np.asarray(landmarks_xyzc, dtype=np.float32)
+    if points.shape != (MEDIAPIPE_LANDMARK_COUNT, 4):
+        raise ValueError(
+            f"Expected MediaPipe world landmarks shaped ({MEDIAPIPE_LANDMARK_COUNT}, 4), "
+            f"got {points.shape}"
+        )
+    if not np.isfinite(points).all():
+        raise ValueError("MediaPipe world landmarks must be finite")
+    if np.any((points[:, 3] < 0) | (points[:, 3] > 1)):
+        raise ValueError("MediaPipe world landmark confidence must be in [0, 1]")
+
+    values = _canonical_landmark_values(points)
+    mapped = np.stack([values[name] for name in SKELETON.names]).astype(np.float32)
+    coordinates = mapped[:, :3]
+    coordinates -= coordinates[:1]
+    coordinates[:, 1:] *= -1.0
+    confidence = np.clip(mapped[:, 3], 0.0, 1.0)
+    return coordinates, confidence
 
 
 def padded_bbox_from_landmarks(

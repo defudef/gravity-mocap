@@ -65,11 +65,30 @@ def load_config(path: Path) -> dict[str, Any]:
     data_config.setdefault("target_fps", 30.0)
     data_config.setdefault("validation_fraction", 0.0)
     data_config.setdefault("split_seed", int(config["seed"]))
+    data_config.setdefault("gravity_view_contract", False)
+    detector_world_3d = data_config.setdefault("detector_world_3d", {"enabled": False})
+    detector_world_3d.setdefault("enabled", False)
+    detector_world_3d.setdefault("noise_std_meters", 0.0)
+    detector_world_3d.setdefault("confidence_min", 1.0)
+    detector_world_3d.setdefault("joint_dropout_probability", 0.0)
     if float(data_config["target_fps"]) <= 0:
         raise ValueError("data.target_fps must be positive")
     validation_fraction = float(data_config["validation_fraction"])
     if not 0 <= validation_fraction < 1:
         raise ValueError("data.validation_fraction must be in [0, 1)")
+    if float(detector_world_3d["noise_std_meters"]) < 0:
+        raise ValueError("data.detector_world_3d.noise_std_meters cannot be negative")
+    if not 0 <= float(detector_world_3d["confidence_min"]) <= 1:
+        raise ValueError("data.detector_world_3d.confidence_min must be in [0, 1]")
+    if not 0 <= float(detector_world_3d["joint_dropout_probability"]) <= 1:
+        raise ValueError("data.detector_world_3d.joint_dropout_probability must be in [0, 1]")
+    model_uses_world_3d = bool(config["model"].get("use_detector_world_3d", False))
+    if model_uses_world_3d != bool(detector_world_3d["enabled"]):
+        raise ValueError(
+            "model.use_detector_world_3d and data.detector_world_3d.enabled must match"
+        )
+    if model_uses_world_3d and not bool(data_config["gravity_view_contract"]):
+        raise ValueError("detector world 3D requires data.gravity_view_contract: true")
     augmentation = data_config.setdefault("augmentation", {"enabled": False})
     augmentation.setdefault("enabled", False)
     probability_names = (
@@ -501,6 +520,8 @@ def run_training(
         paths=train_paths,
         augmentation=config["data"]["augmentation"],
         augmentation_seed=seed,
+        gravity_view_contract=bool(config["data"]["gravity_view_contract"]),
+        detector_world_3d=config["data"]["detector_world_3d"],
     )
     if not dataset:
         raise RuntimeError("No valid preprocessed shards found; training did not start")
@@ -509,6 +530,9 @@ def run_training(
         int(config["data"]["sequence_length"]),
         int(config["data"]["stride"]),
         paths=validation_paths,
+        augmentation_seed=seed,
+        gravity_view_contract=bool(config["data"]["gravity_view_contract"]),
+        detector_world_3d=config["data"]["detector_world_3d"],
     )
     if bool(config["validation"]["enabled"]) and not validation_dataset:
         raise RuntimeError("Validation is enabled but the holdout split contains no windows")

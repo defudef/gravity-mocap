@@ -15,7 +15,7 @@ from torch import nn
 
 from .schema import stable_hash
 
-CHECKPOINT_VERSION = 4
+CHECKPOINT_VERSION = 5
 LATEST_CHECKPOINT = "latest.pt"
 BEST_CHECKPOINT = "best.pt"
 STATE_FILE = "training-state.json"
@@ -65,6 +65,8 @@ def compatibility_payload(config: dict[str, Any]) -> dict[str, Any]:
             "allow_synthetic": data.get("allow_synthetic", False),
             "validation_fraction": data.get("validation_fraction", 0.0),
             "split_seed": data.get("split_seed", 0),
+            "gravity_view_contract": data.get("gravity_view_contract", False),
+            "detector_world_3d": data.get("detector_world_3d", {"enabled": False}),
             "augmentation": data.get("augmentation", {}),
         },
         "model": config["model"],
