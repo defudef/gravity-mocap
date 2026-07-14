@@ -49,7 +49,14 @@ def forward_kinematics(
     return torch.stack(world_positions, dim=-2)
 
 
-def integrate_root_velocity(local_velocity: Tensor, world_orientation: Tensor) -> Tensor:
+def integrate_root_velocity(
+    local_velocity: Tensor, world_orientation: Tensor, *, fps: float
+) -> Tensor:
+    """Integrate local velocity expressed in metres per second."""
+    if fps <= 0:
+        raise ValueError("fps must be positive")
     world_velocity = (world_orientation @ local_velocity.unsqueeze(-1)).squeeze(-1)
     origin = torch.zeros_like(world_velocity[..., :1, :])
-    return torch.cat((origin, torch.cumsum(world_velocity[..., :-1, :], dim=-2)), dim=-2)
+    return torch.cat(
+        (origin, torch.cumsum(world_velocity[..., :-1, :] / float(fps), dim=-2)), dim=-2
+    )

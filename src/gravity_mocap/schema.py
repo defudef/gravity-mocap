@@ -48,6 +48,18 @@ def validate_arrays(arrays: dict[str, np.ndarray]) -> int:
             raise ValueError(f"{name} has shape {value.shape}; expected (T, {tail_shape})")
         if not np.isfinite(value).all():
             raise ValueError(f"{name} contains NaN or infinity")
+    bbox = np.asarray(arrays["bbox"])
+    if np.any(np.abs(bbox) > 1.00001):
+        raise ValueError("bbox must stay within frame-relative [-1, 1]")
+    if np.any(bbox[:, 2:] - bbox[:, :2] <= 1e-5):
+        raise ValueError("bbox must have positive non-degenerate width and height")
+    keypoints = np.asarray(arrays["keypoints_2d"])
+    if np.any(np.abs(keypoints[..., :2]) > 1.00001):
+        raise ValueError("keypoints_2d coordinates must stay within bbox-relative [-1, 1]")
+    if np.any((keypoints[..., 2] < 0) | (keypoints[..., 2] > 1)):
+        raise ValueError("keypoints_2d confidence must stay within [0, 1]")
+    if np.any(np.asarray(arrays["weak_camera"])[..., 0] <= 0):
+        raise ValueError("weak_camera scale must be positive")
     return frame_count
 
 

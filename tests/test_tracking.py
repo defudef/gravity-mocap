@@ -37,6 +37,23 @@ def test_progress_logger_prints_immediately_readable_progress() -> None:
         learning_rate=0.0002,
         elapsed_seconds=61.3,
     )
+    logger.validation_start(epoch=8, epochs=500, windows=1025)
+    logger.validation(
+        epoch=8,
+        epochs=500,
+        metrics={
+            "loss.total": 0.488491,
+            "mpjpe_m": 0.29733,
+            "root_local_drift_m": 0.59966,
+            "contact_f1": 0.25,
+        },
+        train_loss=0.612345,
+        elapsed_seconds=25.6,
+        improved=True,
+        best_loss=0.488491,
+        validations_without_improvement=0,
+        patience=20,
+    )
 
     output = stream.getvalue()
     assert "[train] RESUME" in output
@@ -44,6 +61,11 @@ def test_progress_logger_prints_immediately_readable_progress() -> None:
     assert "step 8/500" in output
     assert "loss 0.369439" in output
     assert "ETA" in output
+    assert "[validation] START | epoch 8/500 | windows=1,025" in output
+    assert "train_loss=0.612345 | val_loss=0.488491" in output
+    assert "val_loss=0.488491" in output
+    assert "MPJPE=29.73cm" in output
+    assert "early_stop=0/20" in output
     assert format_duration(3661) == "1h 01m"
 
 
@@ -86,6 +108,11 @@ def test_mlflow_logs_and_resumes_one_run_without_training(tmp_path: Path) -> Non
         elapsed_seconds=14.0,
     )
     tracker.log_epoch(epoch=3, metrics={"total": 0.6}, global_step=7)
+    tracker.log_validation(
+        epoch=3,
+        metrics={"loss.total": 0.7, "mpjpe_m": 0.08},
+        global_step=7,
+    )
     checkpoint = output / "latest.pt"
     checkpoint.write_bytes(b"not a real checkpoint; tracking-only test")
     (output / "training-state.json").write_text(json.dumps({"global_step": 7}))
@@ -101,6 +128,8 @@ def test_mlflow_logs_and_resumes_one_run_without_training(tmp_path: Path) -> Non
     assert first.info.status == "KILLED"
     assert first.data.metrics["loss.total"] == 0.5
     assert first.data.metrics["epoch_loss.total"] == 0.6
+    assert first.data.metrics["validation.loss.total"] == 0.7
+    assert first.data.metrics["validation.mpjpe_m"] == 0.08
     assert first.data.params["config.model.hidden_dim"] == "64"
     assert {item.path for item in client.list_artifacts(run_id, "inputs")} == {
         "inputs/data-bom.json",

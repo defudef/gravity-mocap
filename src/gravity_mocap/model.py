@@ -108,9 +108,11 @@ class GravityViewMotionModel(nn.Module):
         mlp_ratio: int = 4,
         dropout: float = 0.1,
         attention_radius: int = 120,
+        use_detector_world_3d: bool = False,
     ):
         super().__init__()
         self.joints = joints
+        self.use_detector_world_3d = bool(use_detector_world_3d)
         self.modalities = nn.ModuleDict(
             {
                 "bbox": ModalityMLP(4, hidden_dim),
@@ -119,6 +121,8 @@ class GravityViewMotionModel(nn.Module):
                 "camera_delta_6d": ModalityMLP(6, hidden_dim),
             }
         )
+        if self.use_detector_world_3d:
+            self.modalities["detector_world_3d"] = ModalityMLP(joints * 4, hidden_dim)
         self.blocks = nn.ModuleList(
             [
                 RelativeTransformerBlock(hidden_dim, heads, mlp_ratio, dropout, attention_radius)
@@ -140,8 +144,15 @@ class GravityViewMotionModel(nn.Module):
     def forward(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
         tokens = self.modalities["bbox"](batch["bbox"])
         tokens = tokens + self.modalities["keypoints_2d"](batch["keypoints_2d"].flatten(-2))
-        tokens = tokens + self.modalities["image_features"](batch["image_features"])
+        image_tokens = self.modalities["image_features"](batch["image_features"])
+        tokens = tokens + image_tokens * batch["image_mask"].unsqueeze(-1)
         tokens = tokens + self.modalities["camera_delta_6d"](batch["camera_delta_6d"])
+        if self.use_detector_world_3d:
+            detector_world = torch.cat(
+                (batch["detector_joints_3d"], batch["detector_3d_confidence"].unsqueeze(-1)),
+                dim=-1,
+            )
+            tokens = tokens + self.modalities["detector_world_3d"](detector_world.flatten(-2))
         for block in self.blocks:
             tokens = block(tokens)
         tokens = self.norm(tokens)

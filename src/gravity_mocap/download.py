@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 import uuid
+import zlib
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
@@ -77,6 +78,39 @@ def _verified_or_remove(path: Path, spec: dict) -> bool:
     return True
 
 
+def _streaming_get(spec: dict, headers: dict[str, str]) -> requests.Response:
+    request_options = {
+        "headers": headers,
+        "stream": True,
+        "timeout": (30, 120),
+    }
+    try:
+        return requests.get(spec["url"], **request_options)
+    except requests.exceptions.SSLError as error:
+        fallback_url = spec.get("tls_fallback_url")
+        if not fallback_url:
+            raise
+        primary = urlparse(str(spec["url"]))
+        fallback = urlparse(str(fallback_url))
+        if (
+            primary.scheme != "https"
+            or fallback.scheme != "http"
+            or primary.hostname != fallback.hostname
+            or primary.path != fallback.path
+            or primary.query != fallback.query
+            or not spec.get("sha256")
+        ):
+            raise RuntimeError(
+                "TLS fallback requires the same host/path and a pinned SHA-256"
+            ) from error
+        print(
+            f"[download] TLS chain failed for {primary.hostname}; using the same-host "
+            "checksum-pinned HTTP endpoint",
+            flush=True,
+        )
+        return requests.get(str(fallback_url), **request_options)
+
+
 def _download_http(spec: dict, destination: Path, allow_large: bool) -> list[Path]:
     output = destination / spec["filename"]
     if _verified_or_remove(output, spec):
@@ -105,7 +139,7 @@ def _download_http(spec: dict, destination: Path, allow_large: bool) -> list[Pat
         started = time.monotonic()
         last_report = started
         downloaded = offset
-        with requests.get(spec["url"], headers=headers, stream=True, timeout=(30, 120)) as response:
+        with _streaming_get(spec, headers) as response:
             response.raise_for_status()
             if offset and response.status_code != 206:
                 offset = 0
@@ -347,28 +381,135 @@ def _download_gdrive_folder(spec: dict, destination: Path) -> list[Path]:
     return [Path(path) for path in outputs]
 
 
+def _verified_zip_member(path: Path, expected_bytes: int, expected_crc: int) -> bool:
+    if not path.exists() or path.stat().st_size != expected_bytes:
+        return False
+    checksum = 0
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(8 * 1024 * 1024), b""):
+            checksum = zlib.crc32(block, checksum)
+    return checksum & 0xFFFFFFFF == expected_crc
+
+
+def _select_remote_zip_members(member_infos: list[object], spec: dict) -> list[object]:
+    maximum = int(spec.get("max_core_members", len(member_infos)))
+    group_regex = spec.get("selection_group_regex")
+    if not group_regex:
+        return sorted(
+            member_infos,
+            key=lambda item: (item.file_size, item.filename),
+        )[:maximum]
+    pattern = re.compile(str(group_regex))
+    groups: dict[str, list[object]] = {}
+    for item in member_infos:
+        match = pattern.search(item.filename)
+        if match is None:
+            raise ValueError(
+                f"Remote ZIP member does not match selection_group_regex: {item.filename}"
+            )
+        group = match.group(1) if match.groups() else match.group(0)
+        groups.setdefault(group, []).append(item)
+    for items in groups.values():
+        items.sort(key=lambda item: (item.file_size, item.filename))
+    budget = int(spec.get("max_core_bytes", 0))
+    selected: list[object] = []
+    selected_bytes = 0
+    positions = {group: 0 for group in groups}
+    while len(selected) < maximum:
+        progressed = False
+        for group in sorted(groups):
+            position = positions[group]
+            items = groups[group]
+            if position >= len(items):
+                continue
+            candidate = items[position]
+            positions[group] += 1
+            if budget and selected_bytes + candidate.file_size > budget:
+                continue
+            selected.append(candidate)
+            selected_bytes += candidate.file_size
+            progressed = True
+            if len(selected) >= maximum:
+                break
+        if not progressed:
+            break
+    return selected
+
+
 def _download_remote_zip(spec: dict, destination: Path, profile: str) -> list[Path]:
     from remotezip import RemoteZip
 
     with RemoteZip(spec["url"]) as archive:
         if profile == "smoke":
-            members = list(spec["smoke_members"])
+            member_infos = [archive.getinfo(name) for name in spec["smoke_members"]]
         else:
             pattern = re.compile(spec["member_regex"])
-            members = [
-                item.filename
+            matching = [
+                item
                 for item in archive.infolist()
                 if item.file_size and pattern.search(item.filename)
             ]
-            members = members[: int(spec.get("max_core_members", len(members)))]
-        if not members:
+            member_infos = _select_remote_zip_members(matching, spec)
+        if not member_infos:
             raise RuntimeError("No remote ZIP members matched the configured selection")
-        if any(Path(member).is_absolute() or ".." in Path(member).parts for member in members):
+        if any(
+            Path(item.filename).is_absolute() or ".." in Path(item.filename).parts
+            for item in member_infos
+        ):
             raise RuntimeError("Remote ZIP contains an unsafe member path")
-        total = sum(archive.getinfo(name).file_size for name in members)
-        _check_space(destination, total, allow_large=True)
-        archive.extractall(destination, members)
-    return [destination / member for member in members]
+        outputs = [destination / item.filename for item in member_infos]
+        missing: list[tuple[object, Path]] = []
+        for item, output in zip(member_infos, outputs, strict=True):
+            if _verified_zip_member(output, item.file_size, item.CRC):
+                print(f"[download] verified existing ZIP member {item.filename}", flush=True)
+                continue
+            if output.exists():
+                print(f"[download] discarding incomplete ZIP member {item.filename}", flush=True)
+                output.unlink()
+            partial = output.with_suffix(output.suffix + ".part")
+            if partial.exists():
+                print(f"[download] restarting partial ZIP member {item.filename}", flush=True)
+                partial.unlink()
+            missing.append((item, output))
+
+        _check_space(
+            destination,
+            sum(item.file_size for item, _output in missing),
+            allow_large=True,
+        )
+        for index, (item, output) in enumerate(missing, start=1):
+            output.parent.mkdir(parents=True, exist_ok=True)
+            partial = output.with_suffix(output.suffix + ".part")
+            print(
+                f"[download] ZIP member {index}/{len(missing)}: {item.filename} "
+                f"({item.file_size / 1024**3:.2f} GiB)",
+                flush=True,
+            )
+            started = time.monotonic()
+            last_report = started
+            downloaded = 0
+            checksum = 0
+            with archive.open(item) as source, partial.open("wb") as target:
+                while chunk := source.read(8 * 1024 * 1024):
+                    target.write(chunk)
+                    downloaded += len(chunk)
+                    checksum = zlib.crc32(chunk, checksum)
+                    now = time.monotonic()
+                    if now - last_report >= 5:
+                        elapsed = max(now - started, 0.001)
+                        print(
+                            f"[download] {item.filename}: "
+                            f"{downloaded / item.file_size * 100:.1f}% at "
+                            f"{downloaded / elapsed / 1024**2:.1f} MiB/s",
+                            flush=True,
+                        )
+                        last_report = now
+            if downloaded != item.file_size or checksum & 0xFFFFFFFF != item.CRC:
+                partial.unlink(missing_ok=True)
+                raise ValueError(f"Remote ZIP member failed verification: {item.filename}")
+            os.replace(partial, output)
+            print(f"[download] verified {item.filename}", flush=True)
+    return outputs
 
 
 def describe(entry: DatasetEntry, profile: str) -> str:
@@ -381,7 +522,18 @@ def describe(entry: DatasetEntry, profile: str) -> str:
             else spec.get("max_core_members", "all")
         )
         archive_gib = spec["archive_bytes"] / 1024**3
-        return f"select {selection} member(s) remotely from a {archive_gib:.1f} GiB ZIP"
+        qualifier = (
+            "configured"
+            if profile == "smoke"
+            else "study-stratified" if spec.get("selection_group_regex") else "smallest matching"
+        )
+        budget = ""
+        if profile != "smoke" and spec.get("max_core_bytes"):
+            budget = f" under {int(spec['max_core_bytes']) / 1024**3:.1f} GiB"
+        return (
+            f"select up to {selection} {qualifier} member(s){budget} remotely from a "
+            f"{archive_gib:.1f} GiB ZIP"
+        )
     if kind == "dryad_browser":
         files = spec.get("files", [spec])
         expected_gib = sum(int(file.get("expected_bytes", 0)) for file in files) / 1024**3

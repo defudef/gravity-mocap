@@ -153,6 +153,59 @@ class ProgressLogger:
             f"{progress.next_batch} | reason={reason}"
         )
 
+    def best_checkpoint(
+        self,
+        path: Path,
+        *,
+        epoch: int | None,
+        validation_loss: float | None,
+    ) -> None:
+        loss = "?" if validation_loss is None else f"{validation_loss:.6f}"
+        self._write(f"[checkpoint] best={path} | epoch={epoch} | val_loss={loss}")
+
+    def validation_start(self, *, epoch: int, epochs: int, windows: int) -> None:
+        self._write(f"[validation] START | epoch {epoch}/{epochs} | windows={windows:,}")
+
+    def validation(
+        self,
+        *,
+        epoch: int,
+        epochs: int,
+        metrics: dict[str, float],
+        train_loss: float | None,
+        elapsed_seconds: float,
+        improved: bool,
+        best_loss: float | None,
+        validations_without_improvement: int | None,
+        patience: int | None,
+    ) -> None:
+        train_loss_summary = "partial" if train_loss is None else f"{train_loss:.6f}"
+        parts = [
+            f"[validation] DONE | epoch {epoch}/{epochs}",
+            f"train_loss={train_loss_summary}",
+            f"val_loss={metrics['loss.total']:.6f}",
+            f"MPJPE={metrics['mpjpe_m'] * 100:.2f}cm",
+            f"root_drift={metrics['root_local_drift_m'] * 100:.2f}cm",
+            f"contact_F1={metrics['contact_f1']:.4f}",
+            f"time={format_duration(elapsed_seconds)}",
+        ]
+        if "detector_prior_mpjpe_m" in metrics:
+            parts.insert(
+                4,
+                f"detector_MPJPE={metrics['detector_prior_mpjpe_m'] * 100:.2f}cm",
+            )
+            parts.insert(
+                5,
+                f"MPJPE_gain={metrics['mpjpe_gain_vs_detector_m'] * 100:+.2f}cm",
+            )
+        if best_loss is not None:
+            parts.append(f"best={best_loss:.6f}")
+        if improved:
+            parts.append("IMPROVED")
+        if validations_without_improvement is not None and patience is not None:
+            parts.append(f"early_stop={validations_without_improvement}/{patience}")
+        self._write(" | ".join(parts))
+
     def finish(self, *, status: str, reason: str | None, progress: TrainingProgress) -> None:
         suffix = f" | reason={reason}" if reason else ""
         self._write(
@@ -294,6 +347,15 @@ class MLflowTracker:
             step=global_step,
         )
         self._mlflow.log_metric("progress.completed_epoch", float(epoch), step=global_step)
+
+    def log_validation(self, *, epoch: int, metrics: dict[str, float], global_step: int) -> None:
+        if self.run_id is None or not metrics:
+            return
+        self._mlflow.log_metrics(
+            {f"validation.{name}": value for name, value in metrics.items()},
+            step=global_step,
+        )
+        self._mlflow.log_metric("validation.epoch", float(epoch), step=global_step)
 
     def log_checkpoint(self, path: Path, progress: TrainingProgress, *, reason: str) -> None:
         if self.run_id is None:

@@ -1,6 +1,6 @@
 # Engineering license audit
 
-Snapshot: 2026-07-13. This is an engineering provenance review, not legal
+Snapshot: 2026-07-14. This is an engineering provenance review, not legal
 advice, a patent/FTO search, or a guarantee about how a court would classify
 trained weights.
 
@@ -24,16 +24,31 @@ configs, weights, caches, and derived SMPL parameters are explicitly blocked.
 | Source | Terms used by this project | Approved role | Required handling |
 | --- | --- | --- | --- |
 | [CMU Mocap](https://mocap.cs.cmu.edu/) | CMU permits all uses and inclusion in commercial products, but not resale of the data itself | motion | Preserve CMU acknowledgement; do not redistribute the raw/converted dataset as a product |
-| [AddBiomechanics data](https://addbiomechanics.org/data_sharing_mission.html) | CC BY 4.0 | motion | Preserve per-dataset `DATA_CITATIONS.txt` and attribution; the AddBiomechanics application is GPLv3 but its code is not used |
-| [SAM](https://huggingface.co/datasets/JimSYXu/SAM) | CC BY 4.0 | motion + spatial audio | Attribute the dataset; it is not paired video |
-| [mRI](https://datadryad.org/dataset/doi:10.5061/dryad.9ghx3ffpp) | CC0 1.0 | paired blurred RGB + 3D/2D pose | Require both pinned archives; ignore bundled pretrained `.pkl` models |
-| [HUM4D](https://parkyeeun23.github.io/HUM4D/) | CC BY 4.0 | paired RGB-D + Vicon joints | Use only imagery/calibration/joints; SMPL/SMPL-X parameters are prohibited |
+| [AddBiomechanics data](https://addbiomechanics.org/data_sharing_mission.html) | CC BY 4.0 | motion | Preserve source-study identity, the B3D source href, and original-publication attribution; the AddBiomechanics application is GPLv3 but its code is not used |
+| [100STYLE](https://www.ianxmason.com/100style/) | CC BY 4.0 | styled BVH motion | Preserve author/dataset attribution and the checksum-pinned Zenodo source |
 | [TUM prehabilitation](https://zenodo.org/records/19866202) | CC BY 4.0 plus Data Usage Agreement | radar + camera-derived 3D pose | Explicit acceptance, DOI attribution, no re-identification/contact/tracking/profiling; released files are not paired RGB supervision |
 
-AMASS, BEDLAM, Human3.6M, 3DPW, HumanML3D, and the GVHMR repository remain
+The default `core` profile uses only CMU, AddBiomechanics `train/With_Arm`, and
+100STYLE. TUM is opt-in through `expanded` and requires explicit DUA acceptance.
+
+| Blocked source | Why it cannot enter official checkpoints |
+| --- | --- |
+| [SAM](https://huggingface.co/datasets/JimSYXu/SAM) | The repository label is CC BY 4.0, but the raw motion scope and participant clearance need confirmation; audio and SMPL-X derivatives are excluded |
+| [mRI](https://datadryad.org/dataset/doi:10.5061/dryad.9ghx3ffpp) | Dryad metadata says CC0 while the original publication states CC BY-NC 4.0; bundled pretrained models are also excluded |
+| [HUM4D](https://parkyeeun23.github.io/HUM4D/) | Public processing depends on non-commercial SMPL/SMPL-X assets and the standalone raw Vicon-joint scope is unclear |
+
+AMASS, BEDLAM, Human3.6M, 3DPW, HumanML3D, and the GVHMR repository also remain
 blocked. Unknown `source_id` or license IDs fail closed. Generic NPZ input is
 rejected when any field name indicates SMPL, SMPL-X, body pose/shape, global
 orientation, or another parametric body model.
+
+The official CMU bulk archive host currently omits its intermediate TLS
+certificate. The downloader attempts verified HTTPS first and never disables
+certificate verification. A fallback is accepted only for the configured HTTP
+URL with the same hostname/path and a pinned SHA-256 derived from the official
+HTTPS archive; size and SHA-256 are checked before the file becomes usable.
+This is a source-integrity exception for one static archive, not a general TLS
+downgrade mechanism.
 
 ## Python and GPU dependencies
 
@@ -62,6 +77,30 @@ tool downloads additional analytics packages, including binary components with
 their own notices; it is not imported by training, embedded in checkpoints, or
 part of the locked training environment. Do not redistribute the `uvx` cache as
 if it were Apache-2.0 project output.
+
+### Optional video frontend
+
+The local video frontend uses Google MediaPipe source and the separately
+downloaded **Pose Landmarker Heavy** task bundle under Apache-2.0. The exact
+bundle is fetched from Google's public MediaPipe model bucket, is not committed,
+and must match 30,664,242 bytes and SHA-256
+`64437af838a65d18e5ba7a0d39b465540069bc8aae8308de3e318aad31fcbc7b`.
+The official
+[BlazePose GHUM model card](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20BlazePose%20GHUM%203D.pdf)
+describes training on consented/internal fitness imagery plus synthetic GHUM
+labels; unlike the rejected detector candidates, this bundle does not disclose
+a non-commercial public training dataset.
+
+`mediapipe==0.10.35` and `opencv-contrib-python` are optional, dynamically
+installed packages. Their wheels and bundled third-party notices retain their
+own terms and must not be redistributed as if covered by this repository's
+Apache-2.0 license. Neither the MediaPipe task bundle nor dependency binaries
+are embedded in Gravity Mocap checkpoints or inference artifacts. The
+standalone 2D rig and detector-world-3D sidecar record the detector model hash,
+URL, size, source-video hash, coordinate transform, and metric units; derived
+motion provenance carries those records forward so downstream releases can
+audit which frontend produced it. The world landmarks are another output of
+the same checksum-pinned task bundle, not a second model or dependency.
 
 The optional automated mRI download path invokes pinned `@playwright/cli`
 0.1.17 (Apache-2.0) through an operator's Node.js/npm installation. It is not a

@@ -3,9 +3,30 @@ data:
   catalog: datasets.yaml
   root: ../Saved/GravityMocap/processed
   allow_synthetic: false
+  target_fps: 30
+  gravity_view_contract: true
+  detector_world_3d:
+    enabled: true
+    noise_std_meters: 0.02
+    confidence_min: 0.5
+    joint_dropout_probability: 0.05
+  validation_fraction: 0.10
+  split_seed: 7331
   sequence_length: 120
   stride: 60
   num_workers: 4
+  augmentation:
+    enabled: true
+    keypoint_noise_std: 0.015
+    confidence_min: 0.5
+    keypoint_dropout_probability: 0.05
+    frame_dropout_probability: 0.01
+    occlusion_probability: 0.5
+    occlusion_min_frames: 4
+    occlusion_max_frames: 30
+    occlusion_joint_fraction: 0.3
+    bbox_jitter_std: 0.02
+    camera_dropout_probability: 0.25
 model:
   joints: 22
   image_feature_dim: 512
@@ -15,6 +36,7 @@ model:
   mlp_ratio: 4
   dropout: 0.1
   attention_radius: 120
+  use_detector_world_3d: true
 train:
   batch_size: 16
   gradient_accumulation_steps: 16
@@ -28,6 +50,15 @@ train:
   checkpoint_every: 5
   checkpoint_every_minutes: 15
   keep_last_checkpoints: 3
+validation:
+  enabled: true
+  every_epochs: 1
+  batch_size: 32
+  early_stopping:
+    enabled: true
+    monitor: loss.total
+    patience: 20
+    min_delta: 0.001
 logging:
   log_every_steps: 1
   mlflow:

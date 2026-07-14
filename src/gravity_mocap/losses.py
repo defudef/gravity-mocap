@@ -4,6 +4,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
+from .projection import denormalize_bbox_keypoints, project_motion_to_frame
 from .rotations import forward_kinematics, rotation_6d_to_matrix
 from .skeleton import PARENTS, REST_OFFSETS
 
@@ -22,22 +23,20 @@ def compute_losses(
 ) -> dict[str, Tensor]:
     mask = target["frame_mask"]
     losses: dict[str, Tensor] = {}
+    predicted_rotation_matrices = rotation_6d_to_matrix(prediction["local_rotations_6d"])
+    target_rotation_matrices = rotation_6d_to_matrix(target["local_rotations_6d"])
     losses["rotations"] = _masked_mean(
-        (prediction["local_rotations_6d"] - target["local_rotations_6d"]).square(), mask
+        (predicted_rotation_matrices - target_rotation_matrices).square(), mask
     )
     losses["root_velocity"] = _masked_mean(
         (prediction["root_velocity_local"] - target["root_velocity_local"]).square(), mask
     )
-    losses["orientation"] = _masked_mean(
-        (
-            prediction["gravity_view_orientation_6d"] - target["gravity_view_orientation_6d"]
-        ).square(),
-        mask,
-    )
-    losses["camera_orientation"] = _masked_mean(
-        (prediction["camera_orientation_6d"] - target["camera_orientation_6d"]).square(),
-        mask,
-    )
+    predicted_gravity = rotation_6d_to_matrix(prediction["gravity_view_orientation_6d"])
+    target_gravity = rotation_6d_to_matrix(target["gravity_view_orientation_6d"])
+    losses["orientation"] = _masked_mean((predicted_gravity - target_gravity).square(), mask)
+    predicted_camera = rotation_6d_to_matrix(prediction["camera_orientation_6d"])
+    target_camera = rotation_6d_to_matrix(target["camera_orientation_6d"])
+    losses["camera_orientation"] = _masked_mean((predicted_camera - target_camera).square(), mask)
     losses["weak_camera"] = _masked_mean(
         (prediction["weak_camera"] - target["weak_camera"]).square(), mask
     )
@@ -46,17 +45,22 @@ def compute_losses(
     )
     losses["contacts"] = _masked_mean(contact_bce, mask)
 
-    rotations = rotation_6d_to_matrix(prediction["local_rotations_6d"])
+    rotations = predicted_rotation_matrices
     root = torch.zeros_like(prediction["root_velocity_local"])
     offsets = torch.as_tensor(REST_OFFSETS, device=rotations.device, dtype=rotations.dtype)
     parents = torch.as_tensor(PARENTS, device=rotations.device)
     predicted_joints = forward_kinematics(rotations, root, offsets, parents)
     losses["joints_3d"] = _masked_mean((predicted_joints - target["joints_3d"]).square(), mask)
 
-    projected = predicted_joints[..., :2] / predicted_joints[..., 2:].abs().clamp_min(0.25)
-    keypoint_confidence = target["keypoints_2d"][..., 2] * target["image_mask"].unsqueeze(-1)
+    reprojection_bbox = target.get("bbox_target", target["bbox"])
+    projected = project_motion_to_frame(prediction, predicted_joints)
+    reprojection_target = target.get("keypoints_2d_target", target["keypoints_2d"])
+    reprojection_target_xy = denormalize_bbox_keypoints(
+        reprojection_target[..., :2], reprojection_bbox
+    )
+    keypoint_confidence = reprojection_target[..., 2] * mask.unsqueeze(-1)
     losses["reprojection_2d"] = _masked_mean(
-        (projected - target["keypoints_2d"][..., :2]).square(), keypoint_confidence
+        (projected - reprojection_target_xy).square(), keypoint_confidence
     )
     velocity_delta = (
         prediction["root_velocity_local"][:, 1:] - prediction["root_velocity_local"][:, :-1]

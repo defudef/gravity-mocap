@@ -15,8 +15,9 @@ from torch import nn
 
 from .schema import stable_hash
 
-CHECKPOINT_VERSION = 2
+CHECKPOINT_VERSION = 5
 LATEST_CHECKPOINT = "latest.pt"
+BEST_CHECKPOINT = "best.pt"
 STATE_FILE = "training-state.json"
 
 
@@ -30,12 +31,16 @@ class TrainingProgress:
     complete: bool = False
     stop_reason: str | None = None
     mlflow_run_id: str | None = None
+    best_validation_loss: float | None = None
+    best_validation_epoch: int | None = None
+    validations_without_improvement: int = 0
 
 
 def cleanup_stale_checkpoint_temps(output: Path) -> list[Path]:
     """Remove files that were never atomically promoted after an interrupted save."""
     candidates = [
         output / f"{LATEST_CHECKPOINT}.tmp",
+        output / f"{BEST_CHECKPOINT}.tmp",
         output / f"{STATE_FILE}.tmp",
         *output.glob("epoch-*.pt.tmp"),
     ]
@@ -54,9 +59,15 @@ def compatibility_payload(config: dict[str, Any]) -> dict[str, Any]:
     return {
         "seed": config["seed"],
         "data": {
+            "target_fps": data["target_fps"],
             "sequence_length": data["sequence_length"],
             "stride": data["stride"],
             "allow_synthetic": data.get("allow_synthetic", False),
+            "validation_fraction": data.get("validation_fraction", 0.0),
+            "split_seed": data.get("split_seed", 0),
+            "gravity_view_contract": data.get("gravity_view_contract", False),
+            "detector_world_3d": data.get("detector_world_3d", {"enabled": False}),
+            "augmentation": data.get("augmentation", {}),
         },
         "model": config["model"],
         "optimizer": {
@@ -248,3 +259,15 @@ def archive_latest_checkpoint(output: Path, completed_epoch: int, keep: int) -> 
     for stale in archives[: max(0, len(archives) - keep)]:
         stale.unlink()
     return archive
+
+
+def promote_best_checkpoint(output: Path) -> Path:
+    """Atomically copy the latest full-state checkpoint to the best slot."""
+    latest = output / LATEST_CHECKPOINT
+    if not latest.is_file():
+        raise RuntimeError(f"Cannot promote missing checkpoint: {latest}")
+    best = output / BEST_CHECKPOINT
+    temporary = best.with_suffix(best.suffix + ".tmp")
+    shutil.copy2(latest, temporary)
+    os.replace(temporary, best)
+    return best
