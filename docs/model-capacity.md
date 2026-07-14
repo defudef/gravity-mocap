@@ -1,31 +1,38 @@
 # Dataset size and model capacity
 
-Snapshot: 2026-07-13. The values below size the temporal 2D-to-3D model, not a
+Snapshot: 2026-07-14. The values below size the temporal 2D-to-3D model, not a
 future image detector. No training was run to produce this estimate.
 
 ## Current `core` corpus
 
 All durations are measured after applying each dataset's supported cuts and
-before the deterministic 5% holdout.
+before the deterministic 10% holdout.
 
-| Source | Estimated hours | 30 FPS frames | Basis |
+| Source | Hours | 30 FPS frames | Sequences / groups |
 | --- | ---: | ---: | --- |
-| CMU Mocap | 9.62 | 1,038,799 | current processed inventory |
-| 100STYLE | 18.78 | 2,027,989 | sum of published frame cuts, resampled 60 to 30 FPS |
-| AddBiomechanics core subset | 2.5--3.3 | 270k--355k | 24 selected train B3Ds; bounded by the local B3D seconds/byte ratio and selected/full archive share |
-| **Total** | **30.9--31.7** | **3.34M--3.42M** | |
+| CMU Mocap | 9.62 | 1,038,799 | 2,514 / 112 subjects |
+| 100STYLE | 18.78 | 2,028,184 | 810 / 100 styles |
+| AddBiomechanics core subset | 2.53 | 273,118 | 606 trials / 24 source groups |
+| **Total** | **30.93** | **3,340,101** | **3,930 / 236 groups** |
 
-The AddBiomechanics duration remains an estimate until all 24 selected B3Ds are
-downloaded and their trial headers can be summed. The selection itself is
-exact: 24 B3Ds, eight contributing studies, 10.65 GiB uncompressed. Once
-preprocessing finishes, the generated BOM provides the exact frame count.
+The generated BOM and processed shard inventory provide these exact values. The
+AddBiomechanics selection contains 24 train B3Ds from eight contributing
+studies, totaling 10.65 GiB uncompressed.
 
 Training uses 120-frame (4-second) windows with stride 60 (2 seconds). Ignoring
 small losses at sequence boundaries, the corpus therefore produces:
 
-- about 55.6k--57.0k windows in total;
-- about 52.8k--54.2k training windows after the 5% grouped holdout;
-- about 6.34M--6.50M temporal tokens per epoch.
+- 53,731 windows in total;
+- 47,763 training windows after the 10% grouped holdout;
+- 5,968 validation windows;
+- 5.73M temporal training tokens per epoch.
+
+The previous 5% split selected only 7.8 seconds of AddBiomechanics validation
+motion from one unusually short source group. The 10% split holds out two
+AddBiomechanics groups with 31.5 minutes of motion and produces 27.48 training
+hours plus 3.44 validation hours overall. This makes early stopping materially
+more representative while keeping complete subjects, source files, and styles
+disjoint between train and validation.
 
 Overlapping windows and adjacent frames are highly correlated. Camera sampling
 and detector degradation increase input variety, but they do not create new 3D
@@ -39,7 +46,7 @@ the raw frame count alone.
 Use the existing **6 layers x 384 hidden, 11,526,300 parameter** model in
 `configs/train-small.yaml` for the current `core` corpus. It is large enough for
 the 22-joint temporal mapping while leaving a sensible regularization margin
-for roughly 53--54k training clips.
+for roughly 47.8k training clips.
 
 Do not use the 12x512, 39,263,388-parameter paper-size configuration as the
 default for this corpus. It has 3.4 times as many parameters without 3.4 times

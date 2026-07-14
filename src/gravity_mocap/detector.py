@@ -35,6 +35,7 @@ def normalize_detector_inputs(
 
     normalized_keypoints = keypoints.copy()
     normalized_keypoints[:, :2] = 2.0 * (keypoints[:, :2] - bbox[:2]) / size - 1.0
+    normalized_keypoints[:, :2] = np.clip(normalized_keypoints[:, :2], -1.0, 1.0)
     normalized_keypoints[:, 2] = np.clip(keypoints[:, 2], 0.0, 1.0)
     missing = normalized_keypoints[:, 2] <= 0
     normalized_keypoints[missing, :2] = 0.0

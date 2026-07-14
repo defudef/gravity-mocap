@@ -114,3 +114,16 @@ def test_detector_pixel_contract_normalizes_bbox_and_22_keypoints() -> None:
     assert np.allclose(normalized_keypoints[1:, :2], 0)
     assert np.allclose(normalized_keypoints[0], 0)
     assert np.allclose(normalized_bbox, [-0.6875, -0.7916667, -0.0625, 0.875])
+
+
+def test_detector_pixel_contract_clips_points_outside_frame_bbox() -> None:
+    keypoints = np.tile(np.asarray([300, -20, 0.8], dtype=np.float32), (22, 1))
+    normalized_keypoints, _ = normalize_detector_inputs(
+        keypoints,
+        np.asarray([100, 50, 200, 250], dtype=np.float32),
+        frame_width=640,
+        frame_height=480,
+    )
+
+    assert np.all(normalized_keypoints[:, 0] == 1)
+    assert np.all(normalized_keypoints[:, 1] == -1)

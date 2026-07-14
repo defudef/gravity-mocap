@@ -212,6 +212,56 @@ configuration invalidates old shards and checkpoints by design.
 
 ## External 2D detector contract
 
+### Video tutorial: MediaPipe 2D skeleton -> Gravity Mocap 3D
+
+The optional local video frontend uses the checksum-pinned MediaPipe Pose
+Landmarker Heavy bundle. It tracks one person, maps its 33 landmarks (including
+heels and toes) to the neutral 22-joint contract, and then runs the selected
+Gravity Mocap checkpoint. It does not use SMPL or SMPL-X.
+
+Install the optional video dependencies once:
+
+```sh
+./scripts/setup-video.sh
+```
+
+Run the complete pipeline on a video:
+
+```sh
+./scripts/video.sh infer-video path/to/reference.mp4 \
+  --checkpoint Saved/GravityMocap/runs/motion-small/best.pt
+```
+
+For a quick detector-only check, process at most 90 output frames:
+
+```sh
+./scripts/video.sh detect-video path/to/reference.mp4 --max-frames 90
+```
+
+By default, results go to
+`Saved/GravityMocap/inference/<video-stem>-<source-sha-prefix>/`:
+
+- `detector-inputs.npz` contains normalized inputs plus pixel-space keypoints;
+- `preview-2d.mp4` overlays the detected skeleton on the source video;
+- `motion.npz` contains rotations, FK joints, root translation, contacts, FPS,
+  topology, and provenance;
+- `preview-motion.mp4` places the 2D input beside a neutral 3D skeleton;
+- both JSON manifests record source/model/checkpoint hashes and all parameters.
+
+The operation is idempotent: unchanged source bytes, model, checkpoint, and
+arguments reuse the existing artifacts. `--force` rebuilds them. `--no-preview`
+skips MP4 rendering, `--device cpu|mps|cuda` overrides automatic device choice,
+and `--output PATH` selects another directory. Static/unknown camera motion is
+currently represented by identity camera deltas; zero image features are
+explicitly disabled by `image_mask`, so this frontend works with the existing
+motion-only checkpoint.
+
+MediaPipe tracking improves temporal stability but still assumes one principal
+person. Long detector gaps fail closed instead of silently inventing a track;
+adjust `--max-missing-frames` only after checking `preview-2d.mp4`. A clean 2D
+preview does not guarantee a good 3D result: that also depends on the capacity
+and training state of the chosen Gravity Mocap checkpoint.
+
 The motion model does not require a particular detector. A frontend maps its
 output to the canonical 22-joint order from `src/gravity_mocap/skeleton.py`,
 then supplies one `[x, y, confidence]` row per joint. `x/y` are normalized to
@@ -333,8 +383,8 @@ the target epoch count is allowed. `--max-epochs` is a per-session limit and
 does not change that configured total. Use a new output directory for an
 intentionally incompatible run, or `--resume never` to require an empty one.
 
-The paper config holds out 5% of each source by complete subject when identity
-is available, otherwise by complete sequence. Validation
+The paper and small-model configs hold out 10% of each source by complete
+subject when identity is available, otherwise by complete sequence. Validation
 never receives detector corruption and runs after every completed epoch. It
 logs held-out component losses, MPJPE, root-velocity error, integrated local
 root drift, acceleration error, and contact F1 to MLflow and writes the latest

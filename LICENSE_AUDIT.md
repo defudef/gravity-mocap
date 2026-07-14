@@ -1,6 +1,6 @@
 # Engineering license audit
 
-Snapshot: 2026-07-13. This is an engineering provenance review, not legal
+Snapshot: 2026-07-14. This is an engineering provenance review, not legal
 advice, a patent/FTO search, or a guarantee about how a court would classify
 trained weights.
 
@@ -77,6 +77,27 @@ tool downloads additional analytics packages, including binary components with
 their own notices; it is not imported by training, embedded in checkpoints, or
 part of the locked training environment. Do not redistribute the `uvx` cache as
 if it were Apache-2.0 project output.
+
+### Optional video frontend
+
+The local video frontend uses Google MediaPipe source and the separately
+downloaded **Pose Landmarker Heavy** task bundle under Apache-2.0. The exact
+bundle is fetched from Google's public MediaPipe model bucket, is not committed,
+and must match 30,664,242 bytes and SHA-256
+`64437af838a65d18e5ba7a0d39b465540069bc8aae8308de3e318aad31fcbc7b`.
+The official
+[BlazePose GHUM model card](https://storage.googleapis.com/mediapipe-assets/Model%20Card%20BlazePose%20GHUM%203D.pdf)
+describes training on consented/internal fitness imagery plus synthetic GHUM
+labels; unlike the rejected detector candidates, this bundle does not disclose
+a non-commercial public training dataset.
+
+`mediapipe==0.10.35` and `opencv-contrib-python` are optional, dynamically
+installed packages. Their wheels and bundled third-party notices retain their
+own terms and must not be redistributed as if covered by this repository's
+Apache-2.0 license. Neither the MediaPipe task bundle nor dependency binaries
+are embedded in Gravity Mocap checkpoints or `motion.npz` output. The output
+records the detector model hash so downstream releases can audit which frontend
+produced it.
 
 The optional automated mRI download path invokes pinned `@playwright/cli`
 0.1.17 (Apache-2.0) through an operator's Node.js/npm installation. It is not a

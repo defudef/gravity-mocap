@@ -12,9 +12,11 @@ from .catalog import DatasetCatalog
 from .data import MotionWindowDataset
 from .download import describe, download_dataset
 from .fixture import create_fixture
+from .inference import infer_motion
 from .losses import compute_losses
 from .preprocess import preprocess_dataset
 from .trainer import build_model, load_config, run_training, training_plan
+from .video import default_inference_directory, detect_video
 from .vision import (
     FrameManifestDataset,
     attach_features,
@@ -32,6 +34,7 @@ DEFAULT_DATA_ROOT = (
 DEFAULT_RAW = DEFAULT_DATA_ROOT / "raw"
 DEFAULT_PROCESSED = DEFAULT_DATA_ROOT / "processed"
 DEFAULT_FIXTURE = DEFAULT_DATA_ROOT / "fixtures/synthetic/walk.npz"
+DEFAULT_INFERENCE_CHECKPOINT = DEFAULT_DATA_ROOT / "runs/motion-small/best.pt"
 
 
 def _catalog(path: str) -> DatasetCatalog:
@@ -89,9 +92,7 @@ def command_preprocess(args: argparse.Namespace) -> int:
         else catalog.profile(args.profile)
     )
     total = 0
-    camera_config = dict(
-        catalog.raw.get("preprocessing", {}).get("synthetic_camera", {})
-    )
+    camera_config = dict(catalog.raw.get("preprocessing", {}).get("synthetic_camera", {}))
     for entry in entries:
         written = preprocess_dataset(
             entry,
@@ -215,6 +216,69 @@ def command_attach_features(args: argparse.Namespace) -> int:
     return 0
 
 
+def _video_output(args: argparse.Namespace) -> Path:
+    return args.output or default_inference_directory(
+        args.video.expanduser().resolve(), DEFAULT_DATA_ROOT
+    )
+
+
+def command_detect_video(args: argparse.Namespace) -> int:
+    result = detect_video(
+        args.video,
+        _video_output(args),
+        data_root=DEFAULT_DATA_ROOT,
+        target_fps=args.target_fps,
+        confidence_threshold=args.confidence_threshold,
+        bbox_padding=args.bbox_padding,
+        max_missing_frames=args.max_missing_frames,
+        max_frames=args.max_frames,
+        force=args.force,
+        preview=not args.no_preview,
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def command_infer_video(args: argparse.Namespace) -> int:
+    output = _video_output(args)
+    detector = detect_video(
+        args.video,
+        output,
+        data_root=DEFAULT_DATA_ROOT,
+        target_fps=args.target_fps,
+        confidence_threshold=args.confidence_threshold,
+        bbox_padding=args.bbox_padding,
+        max_missing_frames=args.max_missing_frames,
+        max_frames=args.max_frames,
+        force=args.force,
+        preview=not args.no_preview,
+    )
+    result = infer_motion(
+        Path(detector["detector_inputs"]),
+        args.video,
+        args.checkpoint,
+        output,
+        device_name=args.device,
+        force=args.force,
+        preview=not args.no_preview,
+    )
+    result["detector_status"] = detector["status"]
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def _add_video_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("video", type=Path)
+    parser.add_argument("--output", type=Path)
+    parser.add_argument("--target-fps", type=float, default=30.0)
+    parser.add_argument("--confidence-threshold", type=float, default=0.2)
+    parser.add_argument("--bbox-padding", type=float, default=0.12)
+    parser.add_argument("--max-missing-frames", type=int, default=30)
+    parser.add_argument("--max-frames", type=int)
+    parser.add_argument("--force", action="store_true")
+    parser.add_argument("--no-preview", action="store_true")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Clean-room world-grounded mocap pipeline")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -312,6 +376,20 @@ def build_parser() -> argparse.ArgumentParser:
     attach.add_argument("features", type=Path)
     attach.add_argument("--catalog", default=str(DEFAULT_CATALOG))
     attach.set_defaults(handler=command_attach_features)
+
+    detect = subparsers.add_parser(
+        "detect-video", help="Extract a cached neutral 22-joint skeleton from video"
+    )
+    _add_video_arguments(detect)
+    detect.set_defaults(handler=command_detect_video)
+
+    infer = subparsers.add_parser(
+        "infer-video", help="Run video -> 2D skeleton -> clean-room 3D motion"
+    )
+    _add_video_arguments(infer)
+    infer.add_argument("--checkpoint", type=Path, default=DEFAULT_INFERENCE_CHECKPOINT)
+    infer.add_argument("--device", default="auto", help="auto, cpu, mps, or cuda")
+    infer.set_defaults(handler=command_infer_video)
     return parser
 
 
@@ -319,7 +397,7 @@ def main() -> int:
     args = build_parser().parse_args()
     try:
         return int(args.handler(args))
-    except (RuntimeError, ValueError) as error:
+    except (ImportError, OSError, RuntimeError, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
 

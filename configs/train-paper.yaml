@@ -4,7 +4,7 @@ data:
   root: ../Saved/GravityMocap/processed
   allow_synthetic: false
   target_fps: 30
-  validation_fraction: 0.05
+  validation_fraction: 0.10
   split_seed: 7331
   sequence_length: 120
   stride: 60
