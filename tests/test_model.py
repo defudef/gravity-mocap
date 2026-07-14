@@ -59,6 +59,7 @@ def test_forward_and_losses_are_finite_without_training(tmp_path: Path) -> None:
         )
     assert prediction["local_rotations_6d"].shape == (1, 8, 22, 6)
     assert all(torch.isfinite(value) for value in losses.values())
+    assert losses["reprojection_2d"] < 10
     metrics = compute_motion_metrics(prediction, batch, fps=30)
     assert {"mpjpe_m", "root_velocity_error_mps", "root_local_drift_m", "contact_f1"} <= set(
         metrics

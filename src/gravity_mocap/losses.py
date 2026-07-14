@@ -4,7 +4,7 @@ import torch
 from torch import Tensor
 from torch.nn import functional as F
 
-from .projection import project_motion_to_bbox
+from .projection import denormalize_bbox_keypoints, project_motion_to_frame
 from .rotations import forward_kinematics, rotation_6d_to_matrix
 from .skeleton import PARENTS, REST_OFFSETS
 
@@ -55,11 +55,14 @@ def compute_losses(
     losses["joints_3d"] = _masked_mean((predicted_joints - target["joints_3d"]).square(), mask)
 
     reprojection_bbox = target.get("bbox_target", target["bbox"])
-    projected = project_motion_to_bbox(prediction, predicted_joints, reprojection_bbox)
+    projected = project_motion_to_frame(prediction, predicted_joints)
     reprojection_target = target.get("keypoints_2d_target", target["keypoints_2d"])
+    reprojection_target_xy = denormalize_bbox_keypoints(
+        reprojection_target[..., :2], reprojection_bbox
+    )
     keypoint_confidence = reprojection_target[..., 2] * mask.unsqueeze(-1)
     losses["reprojection_2d"] = _masked_mean(
-        (projected - reprojection_target[..., :2]).square(), keypoint_confidence
+        (projected - reprojection_target_xy).square(), keypoint_confidence
     )
     velocity_delta = (
         prediction["root_velocity_local"][:, 1:] - prediction["root_velocity_local"][:, :-1]

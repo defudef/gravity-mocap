@@ -1,11 +1,12 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from gravity_mocap.data import MotionWindowDataset, partition_sequence_paths
 from gravity_mocap.detector import normalize_detector_inputs
 from gravity_mocap.fixture import create_fixture
-from gravity_mocap.schema import read_shard
+from gravity_mocap.schema import read_shard, validate_arrays
 
 
 def test_fixture_round_trip_and_padding(tmp_path: Path) -> None:
@@ -18,6 +19,16 @@ def test_fixture_round_trip_and_padding(tmp_path: Path) -> None:
     sample = dataset[0]
     assert sample["image_features"].shape == (8, 32)
     assert np.allclose(sample["frame_mask"][6:].numpy(), 0)
+
+
+def test_shard_validation_rejects_degenerate_bbox(tmp_path: Path) -> None:
+    path = create_fixture(tmp_path / "synthetic/walk.npz", frames=6, image_feature_dim=32)
+    arrays, _ = read_shard(path)
+    arrays["bbox"] = arrays["bbox"].copy()
+    arrays["bbox"][0, 2] = arrays["bbox"][0, 0]
+
+    with pytest.raises(ValueError, match="positive non-degenerate"):
+        validate_arrays(arrays)
 
 
 def test_sequence_split_is_stable_and_disjoint(tmp_path: Path) -> None:

@@ -26,7 +26,7 @@ rotations, camera-frame orientation, Gravity-View orientation, local root
 velocity, weak camera, and six stationary probabilities (hands, toes, heels).
 
 The deliberate difference from the paper is removal of body shape and vertex
-losses. FK joint loss, camera-aware bbox-relative 2D reprojection, temporal
+losses. FK joint loss, camera-aware frame-relative 2D reprojection, temporal
 smoothness, contacts, root velocity, and orientation losses remain.
 
 ## Architecture
@@ -42,8 +42,10 @@ The production config uses 12 relative Transformer blocks, 8 attention heads,
 512 hidden dimensions, RoPE, and a receptive-field attention mask. Motion-only
 datasets are resampled to 30 FPS, retargeted to the fixed neutral skeleton, and
 regenerated through FK so rotation and joint targets are exactly consistent.
-They receive deterministic simulated yaw, pitch, roll, translation, padded
-frame-relative bbox, bbox-relative 2D joints, and zero visual features. Root
+They receive deterministic simulated yaw, pitch, roll, translation, auto-framed
+non-degenerate bbox, bbox-relative 2D joints, and zero visual features. The
+reprojection target is converted back to bounded frame-relative coordinates so
+thin boxes cannot amplify an initialization error. Root
 translation is preserved in the bbox input and root velocity is measured in
 metres per second. Paired-video shards use features from the from-scratch crop
 encoder; zero-feature motion shards gate only that modality. The 2D
@@ -130,10 +132,10 @@ Existing atomic shards are reused only when their schema, provenance hash,
 source hashes, converter version, and preprocessing hash match the current
 input; stale or interrupted outputs are regenerated. The current converter
 records both source FPS and canonical 30 FPS. The training audit also rejects a
-converter version older than the current FK-consistent target contract. Such a
+converter version older than the current auto-framed target contract. Such a
 corpus is therefore regenerated automatically by preprocessing, and checkpoint
-version 2 cannot be resumed or used for inference; version 3 requires a fresh
-run on the regenerated shards.
+versions 2 and 3 cannot be resumed or used for inference; version 4 requires a
+fresh run on the regenerated shards.
 
 CMU's archive host currently serves an incomplete TLS chain. Downloads attempt
 HTTPS normally. Only an SSL chain failure may select the configured HTTP URL,

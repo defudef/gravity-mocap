@@ -25,8 +25,8 @@ from .catalog import DatasetEntry
 from .schema import REQUIRED_ARRAYS, SCHEMA_VERSION, stable_hash, write_shard
 from .skeleton import CONTACT_JOINTS, JOINT_NAMES, PARENTS, REST_OFFSETS
 
-CONVERTER_VERSION = "cleanroom-v3-canonical-rig"
-B3D_BVH_CONVERTER_VERSION = "cleanroom-v4-b3d-trials-canonical-rig"
+CONVERTER_VERSION = "cleanroom-v4-auto-framed-rig"
+B3D_BVH_CONVERTER_VERSION = "cleanroom-v5-b3d-trials-auto-framed-rig"
 DEFAULT_TARGET_FPS = 30.0
 DEFAULT_CAMERA_SIMULATION: dict[str, object] = {
     "yaw_degrees": [-180.0, 180.0],
@@ -40,6 +40,7 @@ DEFAULT_CAMERA_SIMULATION: dict[str, object] = {
     "roll_drift_std_degrees": 0.05,
     "translation_drift_std_meters": 0.001,
     "bbox_padding": 0.12,
+    "minimum_bbox_aspect_ratio": 0.2,
 }
 
 
@@ -379,6 +380,10 @@ def resolve_camera_simulation(config: dict[str, object] | None) -> dict[str, obj
     if not np.isfinite(bbox_padding) or not 0 <= bbox_padding < 1:
         raise ValueError("synthetic_camera.bbox_padding must be in [0, 1)")
     resolved["bbox_padding"] = bbox_padding
+    minimum_aspect = float(resolved["minimum_bbox_aspect_ratio"])
+    if not np.isfinite(minimum_aspect) or not 0 < minimum_aspect <= 1:
+        raise ValueError("synthetic_camera.minimum_bbox_aspect_ratio must be in (0, 1]")
+    resolved["minimum_bbox_aspect_ratio"] = minimum_aspect
     if _camera_range(resolved, "distance_meters")[0] <= 0:
         raise ValueError("synthetic_camera.distance_meters must stay positive")
     return resolved
@@ -447,17 +452,31 @@ def _simulate_inputs(
         axis=-1,
     ).astype(np.float32)
     camera_root = np.einsum("tij,tj->ti", camera, world[:, 0]) + translation
-    depth = np.maximum(camera_root[:, 2], 0.25)
+    distance_minimum, distance_maximum = _camera_range(config, "distance_meters")
+    depth = np.clip(camera_root[:, 2], distance_minimum, distance_maximum)
     scale = 1.0 / depth
-    shift = camera_root[:, :2] / depth[:, None]
-    xy = camera_centered[..., :2] * scale[:, None, None] + shift[:, None, :]
-    minimum = xy.min(axis=1)
-    maximum = xy.max(axis=1)
-    size = np.maximum(maximum - minimum, 1e-4)
+    centered_xy = camera_centered[..., :2] * scale[:, None, None]
+    minimum = centered_xy.min(axis=1)
+    maximum = centered_xy.max(axis=1)
+    center = 0.5 * (minimum + maximum)
+    size = maximum - minimum
+    major_size = size.max(axis=-1, keepdims=True)
+    size = np.maximum(size, major_size * float(config["minimum_bbox_aspect_ratio"]))
+    minimum = center - 0.5 * size
+    maximum = center + 0.5 * size
     padding = float(config["bbox_padding"])
-    bbox_minimum = np.clip(minimum - size * padding, -1.0, 1.0)
-    bbox_maximum = np.clip(maximum + size * padding, -1.0, 1.0)
-    bbox_size = np.maximum(bbox_maximum - bbox_minimum, 1e-4)
+    unshifted_bbox_minimum = minimum - size * padding
+    unshifted_bbox_maximum = maximum + size * padding
+    shift_minimum = -1.0 - unshifted_bbox_minimum
+    shift_maximum = 1.0 - unshifted_bbox_maximum
+    if np.any(shift_minimum > shift_maximum):
+        raise ValueError("Synthetic actor cannot be framed inside the configured camera view")
+    proposed_shift = camera_root[:, :2] / depth[:, None]
+    shift = np.clip(proposed_shift, shift_minimum, shift_maximum)
+    bbox_minimum = unshifted_bbox_minimum + shift
+    bbox_maximum = unshifted_bbox_maximum + shift
+    bbox_size = bbox_maximum - bbox_minimum
+    xy = centered_xy + shift[:, None, :]
     normalized = (xy - bbox_minimum[:, None]) / bbox_size[:, None]
     confidence = np.ones((*normalized.shape[:-1], 1), dtype=np.float32)
     keypoints = np.concatenate((np.clip(normalized * 2 - 1, -1.0, 1.0), confidence), axis=-1)

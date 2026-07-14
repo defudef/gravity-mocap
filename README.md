@@ -117,7 +117,7 @@ from an earlier investigation are ignored by the official training corpus.
 - provenance-bearing, finite-value-validated NPZ shards;
 - canonical 30 FPS preprocessing with source/target rates in provenance;
 - FK-consistent neutral-skeleton targets plus simulated full camera motion,
-  detector-style padded bbox, and bbox-relative 2D inputs for motion-only sequences;
+  auto-framed detector-style bbox, and bbox-relative 2D inputs for motion-only sequences;
 - deterministic detector corruption (noise, low confidence, missing joints,
   occlusion, bbox jitter, and optional unknown-camera input);
 - source-stratified, subject/sequence-disjoint validation with 3D motion metrics,
@@ -303,9 +303,10 @@ currently represented by identity camera deltas. `image_mask` gates only the
 optional learned crop features; 2D keypoints and their camera-aware reprojection
 loss remain active for motion-only training.
 
-Checkpoint version 3 is the first version trained against the FK-consistent
-rig and camera-aware 2D target contract. Version 2 checkpoints are rejected by
-training resume and inference instead of silently producing misleading output.
+Checkpoint version 4 is the first version trained against the FK-consistent,
+auto-framed rig and stable frame-relative reprojection contract. Version 2 and
+3 checkpoints are rejected by training resume and inference instead of silently
+producing misleading output.
 This repository still ships no trained weights, so a new checkpoint must be
 trained from regenerated shards before the 3D stage is representative. The 2D
 rig frontend does not require that checkpoint and remains usable independently.

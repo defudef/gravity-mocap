@@ -32,11 +32,21 @@ def normalize_frame_keypoints(frame_xy: Tensor, bbox: Tensor) -> Tensor:
     return (frame_xy - minimum) * (2.0 / size) - 1.0
 
 
-def project_motion_to_bbox(prediction: dict[str, Tensor], joints: Tensor, bbox: Tensor) -> Tensor:
+def denormalize_bbox_keypoints(bbox_xy: Tensor, bbox: Tensor) -> Tensor:
+    """Convert bbox-relative points back to frame-relative coordinates."""
+    minimum = bbox[..., :2].unsqueeze(-2)
+    size = (bbox[..., 2:] - bbox[..., :2]).unsqueeze(-2)
+    return minimum + (bbox_xy + 1.0) * 0.5 * size
+
+
+def project_motion_to_frame(prediction: dict[str, Tensor], joints: Tensor) -> Tensor:
     camera_joints = camera_space_joints(
         prediction["local_rotations_6d"],
         prediction["camera_orientation_6d"],
         joints,
     )
-    frame_xy = weak_project_camera_joints(camera_joints, prediction["weak_camera"])
-    return normalize_frame_keypoints(frame_xy, bbox)
+    return weak_project_camera_joints(camera_joints, prediction["weak_camera"])
+
+
+def project_motion_to_bbox(prediction: dict[str, Tensor], joints: Tensor, bbox: Tensor) -> Tensor:
+    return normalize_frame_keypoints(project_motion_to_frame(prediction, joints), bbox)

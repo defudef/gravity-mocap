@@ -13,6 +13,7 @@ preprocessing:
     roll_drift_std_degrees: 0.05
     translation_drift_std_meters: 0.001
     bbox_padding: 0.12
+    minimum_bbox_aspect_ratio: 0.2
 
 profiles:
   smoke:

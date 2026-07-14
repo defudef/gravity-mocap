@@ -15,7 +15,7 @@ from torch import nn
 
 from .schema import stable_hash
 
-CHECKPOINT_VERSION = 3
+CHECKPOINT_VERSION = 4
 LATEST_CHECKPOINT = "latest.pt"
 BEST_CHECKPOINT = "best.pt"
 STATE_FILE = "training-state.json"

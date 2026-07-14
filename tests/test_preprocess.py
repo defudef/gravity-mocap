@@ -158,6 +158,41 @@ def test_camera_simulation_is_seeded_and_configurable() -> None:
     )
 
 
+def test_camera_simulation_auto_frames_long_motion_without_degenerate_bbox() -> None:
+    rest = np.zeros_like(REST_OFFSETS)
+    for joint, parent in enumerate(PARENTS):
+        rest[joint] = REST_OFFSETS[joint] if parent < 0 else rest[parent] + REST_OFFSETS[joint]
+    positions = np.repeat(rest[None], 300, axis=0)
+    positions[:, :, 2] += np.linspace(0, 100, len(positions), dtype=np.float32)[:, None]
+    arrays = motion_to_arrays(
+        positions,
+        fps=30,
+        image_feature_dim=32,
+        seed=17,
+        camera_config={
+            "yaw_degrees": [89.9, 90.1],
+            "pitch_degrees": [-0.1, 0.1],
+            "roll_degrees": [-0.1, 0.1],
+            "distance_meters": [3.0, 3.1],
+            "horizontal_offset_meters": [-0.01, 0.01],
+            "vertical_offset_meters": [-0.01, 0.01],
+            "yaw_drift_std_degrees": 0.0,
+            "pitch_drift_std_degrees": 0.0,
+            "roll_drift_std_degrees": 0.0,
+            "translation_drift_std_meters": 0.0,
+            "minimum_bbox_aspect_ratio": 0.2,
+        },
+    )
+
+    size = arrays["bbox"][:, 2:] - arrays["bbox"][:, :2]
+    aspect = np.minimum(size[:, 0], size[:, 1]) / np.maximum(size[:, 0], size[:, 1])
+    assert size.min() > 1e-5
+    assert aspect.min() >= 0.2 - 1e-5
+    assert np.abs(arrays["bbox"]).max() <= 1.00001
+    assert arrays["weak_camera"][:, 0].min() >= 1.0 / 3.1 - 1e-6
+    assert arrays["weak_camera"][:, 0].max() <= 1.0 / 3.0 + 1e-6
+
+
 def test_split_groups_preserve_cmu_subjects_and_100style_styles() -> None:
     cmu = DatasetEntry(
         "cmu_mocap",
