@@ -204,7 +204,9 @@ output. A run may continue only when held-out `neutral_gain` becomes positive,
 not merely because the aggregate loss decreases. `best-pose.pt` tracks minimum
 held-out MPJPE independently from the aggregate-loss `best.pt`. The root head
 starts from a stationary path and is speed-bounded; contact loss uses the six
-class frequencies measured from the approved training corpus.
+class frequencies measured from the approved training corpus. Validation also
+reports `accel_gain` against the neutral detector on the same valid joint
+frames, so lower positional error cannot hide a temporally noisier animation.
 
 The capacity calculation is in `docs/model-capacity.md`. In short, current
 `core` yields roughly 53--54 thousand 4-second training windows after the 5%

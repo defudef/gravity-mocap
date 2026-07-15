@@ -454,6 +454,9 @@ Validation reports both raw and neutralized detector MPJPE; positive
 is preserved separately as `best-pose.pt`; `best.pt` continues to track the
 aggregate validation objective. Root velocity starts at stationary, is bounded
 to the audited motion range, and contact BCE uses per-class corpus balance.
+`accel_gain` compares temporal acceleration error against the neutral detector
+on exactly the same valid joint frames; a positive value is required before
+claiming that the learned correction makes animation smoother.
 
 ### Smaller 11.7M-parameter v2 baseline
 

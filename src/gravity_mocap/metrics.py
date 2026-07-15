@@ -47,13 +47,14 @@ def compute_motion_metrics(
         "root_velocity_error_mps": _masked_mean(velocity_error, frame_mask),
         "root_local_drift_m": _masked_mean(root_local_drift, frame_mask),
     }
+    detector_neutral: Tensor | None = None
+    detector_confidence: Tensor | None = None
     if "detector_joints_3d" in target and "detector_3d_confidence" in target:
+        detector_confidence = target["detector_3d_confidence"]
         detector_error = torch.linalg.vector_norm(
             target["detector_joints_3d"] - target["joints_3d"], dim=-1
         )
-        detector_mask = frame_mask.unsqueeze(-1) * (target["detector_3d_confidence"] > 0).to(
-            frame_mask.dtype
-        )
+        detector_mask = frame_mask.unsqueeze(-1) * (detector_confidence > 0).to(frame_mask.dtype)
         detector_mpjpe = _masked_mean(detector_error, detector_mask)
         detector_neutral = retarget_joints_to_neutral_skeleton(target["detector_joints_3d"])
         detector_neutral_error = torch.linalg.vector_norm(
@@ -84,6 +85,29 @@ def compute_motion_metrics(
             predicted_acceleration - target_acceleration, dim=-1
         )
         metrics["acceleration_error_mps2"] = _masked_mean(acceleration_error, acceleration_mask)
+        if detector_neutral is not None and detector_confidence is not None:
+            detector_acceleration = (
+                detector_neutral[:, 2:] - 2 * detector_neutral[:, 1:-1] + detector_neutral[:, :-2]
+            ) * float(fps) ** 2
+            detector_acceleration_error = torch.linalg.vector_norm(
+                detector_acceleration - target_acceleration, dim=-1
+            )
+            detector_acceleration_mask = acceleration_mask.unsqueeze(-1) * (
+                (detector_confidence[:, 2:] > 0)
+                & (detector_confidence[:, 1:-1] > 0)
+                & (detector_confidence[:, :-2] > 0)
+            ).to(frame_mask.dtype)
+            model_acceleration_error = _masked_mean(acceleration_error, detector_acceleration_mask)
+            detector_neutral_acceleration_error = _masked_mean(
+                detector_acceleration_error, detector_acceleration_mask
+            )
+            metrics["acceleration_error_on_detector_frames_mps2"] = model_acceleration_error
+            metrics["detector_neutral_acceleration_error_mps2"] = (
+                detector_neutral_acceleration_error
+            )
+            metrics["acceleration_gain_vs_detector_neutral_mps2"] = (
+                detector_neutral_acceleration_error - model_acceleration_error
+            )
 
     contact_mask = frame_mask.unsqueeze(-1).bool()
     predicted_contacts = prediction["contacts"].sigmoid() >= 0.5

@@ -75,6 +75,32 @@ def test_forward_and_losses_are_finite_without_training(tmp_path: Path) -> None:
     assert all(torch.isfinite(value) for value in metrics.values())
 
 
+def test_detector_acceleration_gain_uses_the_same_valid_frames() -> None:
+    frames = 4
+    joints = torch.zeros((1, frames, 22, 3), dtype=torch.float32)
+    joints[:, :, :, 1] = torch.tensor([0.0, 0.1, 0.4, 0.9]).view(1, frames, 1)
+    prediction = {
+        "joints_3d": retarget_joints_to_neutral_skeleton(joints),
+        "root_velocity_local": torch.zeros((1, frames, 3)),
+        "contacts": torch.full((1, frames, 6), -10.0),
+    }
+    target = {
+        "joints_3d": torch.zeros_like(joints),
+        "root_velocity_local": torch.zeros((1, frames, 3)),
+        "contacts": torch.zeros((1, frames, 6)),
+        "frame_mask": torch.ones((1, frames)),
+        "detector_joints_3d": joints,
+        "detector_3d_confidence": torch.ones((1, frames, 22)),
+    }
+
+    metrics = compute_motion_metrics(prediction, target, fps=30)
+
+    assert metrics["detector_neutral_acceleration_error_mps2"] == pytest.approx(
+        metrics["acceleration_error_on_detector_frames_mps2"]
+    )
+    assert metrics["acceleration_gain_vs_detector_neutral_mps2"] == pytest.approx(0.0)
+
+
 def test_motion_targets_are_fk_consistent_and_reprojection_stays_active(
     tmp_path: Path,
 ) -> None:
