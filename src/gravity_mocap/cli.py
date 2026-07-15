@@ -279,6 +279,7 @@ def command_infer_video(args: argparse.Namespace) -> int:
         device_name=args.device,
         force=args.force,
         preview=not args.no_preview,
+        avatar_renderer=args.avatar_renderer,
     )
     result["rig_2d_status"] = rig["status"]
     result["detector_status"] = rig["status"]
@@ -308,6 +309,7 @@ def command_infer_video_baseline(args: argparse.Namespace) -> int:
         smoothing_window=args.smoothing_window,
         force=args.force,
         preview=not args.no_preview,
+        avatar_renderer=args.avatar_renderer,
     )
     result["detector_status"] = detection["status"]
     result["rig_2d"] = detection["rig_2d"]
@@ -327,6 +329,7 @@ def command_infer_rig(args: argparse.Namespace) -> int:
         device_name=args.device,
         force=args.force,
         preview=args.source_video is not None and not args.no_preview,
+        avatar_renderer=args.avatar_renderer,
     )
     print(json.dumps(result, indent=2))
     return 0
@@ -343,6 +346,7 @@ def command_infer_detector_world(args: argparse.Namespace) -> int:
         smoothing_window=args.smoothing_window,
         force=args.force,
         preview=preview,
+        avatar_renderer=args.avatar_renderer,
     )
     print(json.dumps(result, indent=2))
     return 0
@@ -369,6 +373,15 @@ def _add_video_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--max-frames", type=int)
     parser.add_argument("--force", action="store_true")
     parser.add_argument("--no-preview", action="store_true")
+
+
+def _add_avatar_renderer_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--avatar-renderer",
+        choices=("auto", "mesh", "procedural"),
+        default="auto",
+        help="auto uses the bundled gray mesh when Blender is available",
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -501,6 +514,7 @@ def build_parser() -> argparse.ArgumentParser:
     infer_rig_parser.add_argument("--device", default="auto", help="auto, cpu, mps, or cuda")
     infer_rig_parser.add_argument("--force", action="store_true")
     infer_rig_parser.add_argument("--no-preview", action="store_true")
+    _add_avatar_renderer_argument(infer_rig_parser)
     infer_rig_parser.set_defaults(handler=command_infer_rig)
 
     infer_world_parser = subparsers.add_parser(
@@ -514,12 +528,14 @@ def build_parser() -> argparse.ArgumentParser:
     infer_world_parser.add_argument("--smoothing-window", type=int, default=5)
     infer_world_parser.add_argument("--force", action="store_true")
     infer_world_parser.add_argument("--no-preview", action="store_true")
+    _add_avatar_renderer_argument(infer_world_parser)
     infer_world_parser.set_defaults(handler=command_infer_detector_world)
 
     infer = subparsers.add_parser(
         "infer-video", help="Run video -> 2D skeleton -> clean-room 3D motion"
     )
     _add_video_arguments(infer)
+    _add_avatar_renderer_argument(infer)
     infer.add_argument("--checkpoint", type=Path, default=DEFAULT_INFERENCE_CHECKPOINT)
     infer.add_argument("--device", default="auto", help="auto, cpu, mps, or cuda")
     infer.set_defaults(handler=command_infer_video)
@@ -529,6 +545,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Run video -> detector world 3D -> neutral motion without training",
     )
     _add_video_arguments(baseline)
+    _add_avatar_renderer_argument(baseline)
     baseline.add_argument("--smoothing-window", type=int, default=5)
     baseline.set_defaults(handler=command_infer_video_baseline)
 

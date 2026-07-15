@@ -11,15 +11,17 @@ This repository contains training infrastructure, not trained weights. The
 default CLI behavior is deliberately safe: download and training commands only
 print a plan until `--execute` is supplied.
 
-## Video to detector-safe 3D demo
+## Video to gray-avatar 3D demo
 
-![Source video, MediaPipe baseline, and residual v7 comparison](docs/assets/residual-v7-demo.gif)
+![Source video and two uniformly gray Quaternius motion previews](docs/assets/residual-v7-demo.gif)
 
 The left panel shows the source with the detected 2D rig, the middle panel is
 the neutral fixed-bone detector baseline, and the right panel is the v7
-detector-safe residual output. [Open the full H.264 MP4](docs/assets/residual-v7-demo.mp4).
+detector-safe residual output. Both 3D panels use the same uniformly gray,
+CC0-licensed Quaternius mesh so the comparison isolates motion rather than
+avatar geometry or colour. [Open the full H.264 MP4](docs/assets/residual-v7-demo.mp4).
 The demo was rendered from a local qualification checkpoint; trained weights
-are not included in this repository. Media provenance is recorded in
+are not included in this repository. Media and avatar provenance are recorded in
 [`docs/assets/README.md`](docs/assets/README.md).
 
 ## Quickstart: from clone to resumable training
@@ -296,9 +298,10 @@ This writes `detector-baseline-motion.npz`,
 `detector-baseline-manifest.json`, and `preview-detector-baseline.mp4`. Short
 world-landmark gaps are interpolated under the same fail-closed gap limit,
 confidence-weighted temporal smoothing is applied, and the result is retargeted
-to the repository's neutral skeleton. The preview uses the same solid procedural
-3D avatar as learned inference, making joint flips and implausible articulation
-easier to see than on a stick skeleton. This is a local-pose baseline: root
+to the repository's neutral skeleton. When Blender is available, the preview
+uses the bundled uniformly gray Quaternius mesh used by learned inference,
+making joint flips and implausible articulation easier to see than on a stick
+skeleton. This is a local-pose baseline: root
 translation is intentionally stationary until a learned world-grounding model
 predicts it.
 
@@ -327,12 +330,21 @@ video hash must match the rig provenance. The 3D stage adds:
 
 - `motion.npz` contains rotations, FK joints, root translation, contacts, FPS,
   topology, and provenance;
-- `preview-motion.mp4` places the 2D input beside a depth-sorted procedural 3D
-  avatar in the predicted camera frame. The avatar uses tapered limbs, a solid
-  torso, head, hands, feet, and distinct left/right colours, but remains the
-  same neutral 22-joint rig with no SMPL/SMPL-X asset;
+- `preview-motion.mp4` places the 2D input beside a rigged, uniformly gray
+  Quaternius character in the predicted camera frame. Its major bones are
+  retargeted directly from the same neutral 22-joint rig; it does not introduce
+  SMPL/SMPL-X or change the motion artifact;
 - `motion-manifest.json` carries the complete rig/source/model and checkpoint
   provenance.
+
+The default `--avatar-renderer auto` selects the mesh renderer when `blender`
+is on `PATH` and otherwise falls back to the lightweight procedural renderer.
+Use `--avatar-renderer mesh` to require the gray character, or
+`--avatar-renderer procedural` to explicitly select the dependency-free
+fallback. The GLB, CC0 notice, source hashes, transformation record, and build
+script are committed under `src/gravity_mocap/assets/` and
+`scripts/build_quaternius_avatar.py`. Blender is an external preview tool; it is
+not imported by training and its output never becomes a training shard.
 
 For convenience, the composed command still runs both stages:
 
@@ -351,13 +363,13 @@ source, MediaPipe baseline, and learned avatar in three aligned panels:
   path/to/comparison.mp4
 ```
 
-The operation is idempotent: unchanged source bytes, model, checkpoint, and
-arguments reuse the existing artifacts. `--force` rebuilds them. `--no-preview`
-skips MP4 rendering, `--device cpu|mps|cuda` overrides automatic device choice,
-and `--output PATH` selects another directory. Static/unknown camera motion is
-currently represented by identity camera deltas. `image_mask` gates only the
-optional learned crop features; 2D keypoints and their camera-aware reprojection
-loss remain active for motion-only training.
+The operation is idempotent: unchanged source bytes, model, checkpoint, avatar
+renderer, and arguments reuse the existing artifacts. `--force` rebuilds them.
+`--no-preview` skips MP4 rendering, `--device cpu|mps|cuda` overrides automatic
+device choice, and `--output PATH` selects another directory. Static/unknown
+camera motion is currently represented by identity camera deltas. `image_mask`
+gates only the optional learned crop features; 2D keypoints and their
+camera-aware reprojection loss remain active for motion-only training.
 
 Checkpoint version 5 introduces the Gravity-View target contract and the
 detector-world prior. Absolute world yaw is no longer used as a target that

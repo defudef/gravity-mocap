@@ -1,6 +1,6 @@
 # Engineering license audit
 
-Snapshot: 2026-07-14. This is an engineering provenance review, not legal
+Snapshot: 2026-07-15. This is an engineering provenance review, not legal
 advice, a patent/FTO search, or a guarantee about how a court would classify
 trained weights.
 
@@ -101,6 +101,27 @@ URL, size, source-video hash, coordinate transform, and metric units; derived
 motion provenance carries those records forward so downstream releases can
 audit which frontend produced it. The world landmarks are another output of
 the same checksum-pinned task bundle, not a second model or dependency.
+
+### Optional 3D avatar preview
+
+The bundled gray preview character is the **Superhero Male Full Body** asset
+from Quaternius' free Universal Base Characters Standard pack, released under
+[CC0 1.0 Universal](https://creativecommons.org/publicdomain/zero/1.0/). The
+official source is the
+[Quaternius pack page](https://quaternius.com/packs/universalbasecharacters.html).
+The downloaded Standard archive is pinned to SHA-256
+`fdbf1804c90dfc1ea03e992bff7da2dfd1a79318e13270a660180f9308455f40`.
+The source glTF and BIN hashes, output GLB hash, transformation list, and build
+tool version are retained beside the asset in
+`src/gravity_mocap/assets/quaternius_gray_man.provenance.json`.
+
+Gravity Mocap strips source images and actions and replaces body, eye, and
+eyebrow materials with one matte gray material while retaining the original
+CC0 mesh, armature, and skin weights. This asset is used only to render an
+inference preview. It is not a training source, feature, checkpoint component,
+or motion representation and does not add SMPL/SMPL-X data. Blender is invoked
+as an optional external executable to render PNG frames; Blender itself is not
+vendored, dynamically linked into the project, or included in checkpoints.
 
 The optional automated mRI download path invokes pinned `@playwright/cli`
 0.1.17 (Apache-2.0) through an operator's Node.js/npm installation. It is not a

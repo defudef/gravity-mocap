@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import numpy as np
@@ -11,6 +12,12 @@ import torch
 from .artifacts import write_json_atomic, write_npz_atomic
 from .avatar import AVATAR_RENDER_VERSION, render_avatar_panel
 from .checkpoint import CHECKPOINT_VERSION
+from .mesh_avatar import (
+    AVATAR_RENDERERS,
+    avatar_provenance,
+    render_mesh_avatar_frames,
+    resolve_avatar_renderer,
+)
 from .model import GravityViewMotionModel
 from .projection import camera_space_joints
 from .rig2d import load_rig_2d
@@ -138,52 +145,93 @@ def _render_motion_preview(
     *,
     nearer_positive: bool = True,
     avatar_title: str = "Gravity Mocap - learned 3D avatar",
-) -> None:
+    avatar_renderer: str = "auto",
+) -> str:
     cv2, _, _ = _video_dependencies()
+    renderer = resolve_avatar_renderer(avatar_renderer)
     first_frame = next(_sampled_frames(video, indices[:1]))[2]
     source_height, source_width = first_frame.shape[:2]
     panel_width = source_height
     temporary = output.with_name(f"{output.stem}.tmp{output.suffix}")
-    writer = cv2.VideoWriter(
-        str(temporary),
-        cv2.VideoWriter_fourcc(*"mp4v"),
-        fps,
-        (source_width + panel_width, source_height),
-    )
-    if not writer.isOpened():
-        raise RuntimeError(f"Cannot create motion preview: {temporary}")
-    extents = np.ptp(joints_3d[..., :2], axis=1)
-    scale = 0.75 * source_height / max(float(np.percentile(extents, 95)), 0.5)
-    center = np.asarray([panel_width / 2.0, source_height * 0.55], dtype=np.float32)
-    try:
-        for output_index, _, frame in _sampled_frames(video, indices):
-            points_2d = pixel_keypoints[output_index]
-            for joint, parent in enumerate(SKELETON.parents):
-                if parent < 0 or points_2d[joint, 2] <= 0 or points_2d[parent, 2] <= 0:
-                    continue
-                cv2.line(
-                    frame,
-                    tuple(points_2d[int(parent), :2].round().astype(int)),
-                    tuple(points_2d[joint, :2].round().astype(int)),
-                    (100, 255, 100),
-                    2,
-                    cv2.LINE_AA,
-                )
-            pose = joints_3d[output_index]
-            panel = render_avatar_panel(
-                cv2,
-                pose,
+    with TemporaryDirectory(prefix="gravity-mocap-avatar-") as temporary_directory:
+        mesh_frames = (
+            render_mesh_avatar_frames(
+                joints_3d,
+                Path(temporary_directory),
                 width=panel_width,
                 height=source_height,
-                scale=scale,
-                center=center,
-                nearer_positive=nearer_positive,
-                title=avatar_title,
+                fps=fps,
             )
-            writer.write(np.concatenate((frame, panel), axis=1))
-    finally:
-        writer.release()
+            if renderer == "mesh"
+            else None
+        )
+        writer = cv2.VideoWriter(
+            str(temporary),
+            cv2.VideoWriter_fourcc(*"mp4v"),
+            fps,
+            (source_width + panel_width, source_height),
+        )
+        if not writer.isOpened():
+            raise RuntimeError(f"Cannot create motion preview: {temporary}")
+        extents = np.ptp(joints_3d[..., :2], axis=1)
+        scale = 0.75 * source_height / max(float(np.percentile(extents, 95)), 0.5)
+        center = np.asarray([panel_width / 2.0, source_height * 0.55], dtype=np.float32)
+        try:
+            for output_index, _, frame in _sampled_frames(video, indices):
+                points_2d = pixel_keypoints[output_index]
+                for joint, parent in enumerate(SKELETON.parents):
+                    if parent < 0 or points_2d[joint, 2] <= 0 or points_2d[parent, 2] <= 0:
+                        continue
+                    cv2.line(
+                        frame,
+                        tuple(points_2d[int(parent), :2].round().astype(int)),
+                        tuple(points_2d[joint, :2].round().astype(int)),
+                        (100, 255, 100),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                if mesh_frames is None:
+                    panel = render_avatar_panel(
+                        cv2,
+                        joints_3d[output_index],
+                        width=panel_width,
+                        height=source_height,
+                        scale=scale,
+                        center=center,
+                        nearer_positive=nearer_positive,
+                        title=avatar_title,
+                    )
+                else:
+                    panel = cv2.imread(str(mesh_frames[output_index]), cv2.IMREAD_COLOR)
+                    if panel is None or panel.shape[:2] != (source_height, panel_width):
+                        raise RuntimeError(
+                            f"Cannot read rendered avatar frame: {mesh_frames[output_index]}"
+                        )
+                    cv2.putText(
+                        panel,
+                        avatar_title,
+                        (20, 34),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.65,
+                        (238, 238, 244),
+                        2,
+                        cv2.LINE_AA,
+                    )
+                    cv2.putText(
+                        panel,
+                        "Quaternius CC0 - neutral 22-joint retarget - no SMPL",
+                        (20, source_height - 18),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        0.42,
+                        (168, 168, 180),
+                        1,
+                        cv2.LINE_AA,
+                    )
+                writer.write(np.concatenate((frame, panel), axis=1))
+        finally:
+            writer.release()
     os.replace(temporary, output)
+    return renderer
 
 
 def infer_rig(
@@ -196,6 +244,7 @@ def infer_rig(
     device_name: str = "auto",
     force: bool = False,
     preview: bool = False,
+    avatar_renderer: str = "auto",
 ) -> dict[str, Any]:
     """Recover neutral 3D motion from a standalone 2D rig artifact."""
     rig_2d_path = rig_2d_path.expanduser().resolve()
@@ -208,6 +257,14 @@ def infer_rig(
     )
     if preview and video is None:
         raise ValueError("A source video is required to render the 3D motion preview")
+    if avatar_renderer not in AVATAR_RENDERERS:
+        raise ValueError(
+            f"Unknown avatar renderer {avatar_renderer!r}; "
+            f"expected one of {', '.join(AVATAR_RENDERERS)}"
+        )
+    actual_avatar_renderer = (
+        resolve_avatar_renderer(avatar_renderer) if preview else avatar_renderer
+    )
     if video is not None and not video.is_file():
         raise ValueError(f"Video does not exist: {video}")
     rig = load_rig_2d(rig_2d_path)
@@ -249,6 +306,8 @@ def infer_rig(
     request = {
         "inference_version": INFERENCE_VERSION,
         "avatar_render_version": AVATAR_RENDER_VERSION,
+        "avatar_renderer": actual_avatar_renderer,
+        "avatar_asset": (avatar_provenance() if actual_avatar_renderer == "mesh" else None),
         "rig_2d_sha256": rig_digest,
         "rig_2d_request_hash": rig.provenance.get("request_hash"),
         "detector_world_3d_sha256": (
@@ -276,6 +335,7 @@ def infer_rig(
                     "motion": str(motion_path),
                     "manifest": str(manifest_path),
                     "preview": str(preview_path) if preview_path.is_file() else None,
+                    "avatar_renderer": manifest.get("avatar_renderer"),
                 }
         except (json.JSONDecodeError, KeyError, OSError):
             pass
@@ -374,6 +434,7 @@ def infer_rig(
             fps,
             nearer_positive=True,
             avatar_title="B - detector-safe residual v7",
+            avatar_renderer=actual_avatar_renderer,
         )
     write_json_atomic(
         manifest_path,
@@ -390,6 +451,7 @@ def infer_rig(
         "motion": str(motion_path),
         "manifest": str(manifest_path),
         "preview": str(preview_path) if preview else None,
+        "avatar_renderer": actual_avatar_renderer,
     }
 
 
@@ -402,6 +464,7 @@ def infer_motion(
     device_name: str = "auto",
     force: bool = False,
     preview: bool = True,
+    avatar_renderer: str = "auto",
 ) -> dict[str, Any]:
     """Backward-compatible video-bound wrapper around :func:`infer_rig`."""
     return infer_rig(
@@ -412,4 +475,5 @@ def infer_motion(
         device_name=device_name,
         force=force,
         preview=preview,
+        avatar_renderer=avatar_renderer,
     )

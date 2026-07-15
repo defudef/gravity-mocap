@@ -52,3 +52,8 @@ def test_video_to_rig_cli_has_backward_compatible_detector_alias() -> None:
     assert detector_world.handler is command_infer_detector_world
     assert baseline.handler is command_infer_video_baseline
     assert compare.handler is command_compare_previews
+    assert infer.avatar_renderer == "auto"
+    assert baseline.avatar_renderer == "auto"
+
+    required_mesh = parser.parse_args(["infer-rig", "rig-2d.npz", "--avatar-renderer", "mesh"])
+    assert required_mesh.avatar_renderer == "mesh"

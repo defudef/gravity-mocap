@@ -1,0 +1,25 @@
+{
+  "asset_name": "Quaternius Universal Base Characters - Superhero Male Full Body",
+  "asset_variant": "Standard FREE pack",
+  "author": "Quaternius",
+  "license_id": "CC0-1.0",
+  "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+  "source_url": "https://quaternius.com/packs/universalbasecharacters.html",
+  "download_archive_sha256": "fdbf1804c90dfc1ea03e992bff7da2dfd1a79318e13270a660180f9308455f40",
+  "source_gltf": "Base Characters/Godot - UE/Superhero_Male_FullBody.gltf",
+  "source_gltf_sha256": "e7fcea214ecf8855afbf910b50de6f9c7d1decfb71ca28bad8a4481452dafeb4",
+  "source_bin": "Base Characters/Godot - UE/Superhero_Male_FullBody.bin",
+  "source_bin_sha256": "459003f9745853ae562a85506a2b94dd56515c1f37728f9fa3d2ce1a3e4cd92f",
+  "output_glb": "quaternius_gray_man.glb",
+  "output_glb_sha256": "080bd8d01037e188129b86930ed424316cb912d64f7967504bd22b7e1c1bd8e3",
+  "build_script": "scripts/build_quaternius_avatar.py",
+  "build_tool": "Blender 5.1.2",
+  "built_on": "2026-07-15",
+  "transformations": [
+    "removed source textures and images",
+    "removed source animation actions and unrigged helper geometry",
+    "replaced all body, eye, and eyebrow materials with one matte gray material",
+    "retained the original armature, skin weights, and mesh geometry"
+  ],
+  "training_role": "none; inference preview rendering only"
+}
