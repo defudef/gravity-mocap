@@ -184,8 +184,41 @@ configuration at the paper model's output because their checkpoints are
 intentionally incompatible.
 
 Version-4 `motion-small/` checkpoints remain isolated and cannot resume into
-the Gravity-View/detector-prior v5 job. Use `scripts/train-v2-canary.sh` for an
-isolated three-epoch dry-run/execute canary before starting the full v2 output.
+the Gravity-View/detector-prior v5 job. Its three-epoch canary improved MPJPE
+from 15.32 cm to 10.87 cm, but the raw detector prior was already 4.31 cm and
+contact F1 ended at zero. Do not extend that run.
+
+The recommended successor is the checkpoint-v7 detector-safe residual model.
+It enforces neutral bone lengths, starts with an exact zero correction to the
+neutralized detector pose, and bounds learned corrections by detector
+confidence. Preview and execute its isolated canary with:
+
+```sh
+./scripts/train-residual-canary.sh
+./scripts/train-residual-canary.sh --execute
+```
+
+Use `scripts/train-residual-small.sh` for a fresh production output and later
+resumes. It writes below `runs/motion-small-v3-residual`; never point it at a v5
+output. A run may continue only when held-out `neutral_gain` becomes positive,
+not merely because the aggregate loss decreases. `best-pose.pt` tracks minimum
+held-out MPJPE independently from the aggregate-loss `best.pt`. The root head
+starts from a stationary path and is speed-bounded; contact loss uses the six
+class frequencies measured from the approved training corpus. Validation also
+reports `accel_gain` against the neutral detector on the same valid joint
+frames, so lower positional error cannot hide a temporally noisier animation.
+
+The local v7 qualification run reached 2.68 cm held-out MPJPE at epoch 46,
+compared with 4.31 cm for the raw detector and 4.66 cm for the neutralized
+prior. Its root drift was 17.38 cm, contact F1 was 0.433, and acceleration error
+was 55.81 m/s^2 versus 95.79 m/s^2 for the neutral detector
+(`accel_gain=+39.98 m/s^2`). The `min_delta`-selected aggregate checkpoint is
+epoch 38; the separately retained best-pose checkpoint is epoch 46. A real
+12-second detector clip remained stable and reduced mean joint acceleration
+from 7.76 to 7.26 m/s^2, but its predicted root path was still 4.16 m and all
+contact probabilities stayed below 0.5. Further training on the same simulated
+detector distribution is therefore not sufficient evidence for world/root or
+contact quality; keep those as explicit real-input qualification failures.
 
 The capacity calculation is in `docs/model-capacity.md`. In short, current
 `core` yields roughly 53--54 thousand 4-second training windows after the 5%

@@ -25,7 +25,7 @@ from .skeleton import SKELETON
 from .video import _sampled_frames, _video_dependencies, file_sha256
 from .world3d import load_detector_world_3d, prepare_detector_world_3d
 
-INFERENCE_VERSION = 2
+INFERENCE_VERSION = 4
 
 
 def resolve_device(name: str) -> torch.device:
@@ -123,7 +123,8 @@ def _blend_predictions(
         "camera_orientation_6d",
         "gravity_view_orientation_6d",
     ):
-        outputs[name] = matrix_to_rotation_6d(rotation_6d_to_matrix(outputs[name]))
+        if name in outputs:
+            outputs[name] = matrix_to_rotation_6d(rotation_6d_to_matrix(outputs[name]))
     return outputs
 
 
@@ -286,18 +287,31 @@ def infer_rig(
         stride=stride,
         device=device,
     )
-    local_rotations_6d = prediction["local_rotations_6d"]
+    model_joints = prediction.get("joints_3d")
+    if model_joints is not None:
+        from .preprocess import canonicalize_motion_skeleton
+
+        local_rotations_numpy, centered_joints_numpy = canonicalize_motion_skeleton(
+            model_joints.cpu().numpy()
+        )
+        local_rotations_6d = torch.from_numpy(local_rotations_numpy).to(device)
+        centered_joints = torch.from_numpy(centered_joints_numpy).to(device)
+        gravity_view_orientation_6d = local_rotations_6d[:, 0]
+    else:
+        local_rotations_6d = prediction["local_rotations_6d"]
+        local_rotations = rotation_6d_to_matrix(local_rotations_6d)
+        offsets = torch.from_numpy(SKELETON.rest_offsets).to(device)
+        parents = torch.from_numpy(SKELETON.parents).to(device)
+        centered_joints = forward_kinematics(
+            local_rotations,
+            torch.zeros((len(inputs["frame_mask"]), 3), dtype=torch.float32, device=device),
+            offsets,
+            parents,
+        )
+        gravity_view_orientation_6d = prediction["gravity_view_orientation_6d"]
     local_rotations = rotation_6d_to_matrix(local_rotations_6d)
     root_velocity = prediction["root_velocity_local"]
     root_translation = integrate_root_velocity(root_velocity, local_rotations[:, 0], fps=fps)
-    offsets = torch.from_numpy(SKELETON.rest_offsets).to(device)
-    parents = torch.from_numpy(SKELETON.parents).to(device)
-    centered_joints = forward_kinematics(
-        local_rotations,
-        torch.zeros((len(inputs["frame_mask"]), 3), dtype=torch.float32, device=device),
-        offsets,
-        parents,
-    )
     camera_joints = camera_space_joints(
         local_rotations_6d,
         prediction["camera_orientation_6d"],
@@ -310,7 +324,7 @@ def infer_rig(
         "local_rotations_6d": local_rotations_6d.cpu().numpy(),
         "local_rotation_matrices": local_rotations.cpu().numpy(),
         "camera_orientation_6d": prediction["camera_orientation_6d"].cpu().numpy(),
-        "gravity_view_orientation_6d": prediction["gravity_view_orientation_6d"].cpu().numpy(),
+        "gravity_view_orientation_6d": gravity_view_orientation_6d.cpu().numpy(),
         "root_velocity_local": root_velocity.cpu().numpy(),
         "root_translation": root_translation.cpu().numpy(),
         "joints_3d": centered_joints.cpu().numpy(),
@@ -319,6 +333,9 @@ def infer_rig(
         "contacts": contacts.cpu().numpy(),
         "weak_camera": prediction["weak_camera"].cpu().numpy(),
     }
+    if model_joints is not None:
+        arrays["model_joints_3d"] = model_joints.cpu().numpy()
+        arrays["detector_residual_3d"] = prediction["detector_residual_3d"].cpu().numpy()
     if not all(np.isfinite(value).all() for value in arrays.values()):
         raise RuntimeError("Motion inference produced NaN or infinity")
     provenance = {
@@ -352,11 +369,11 @@ def infer_rig(
             video,
             inputs["source_frame_indices"].astype(np.int64),
             inputs["pixel_keypoints"],
-            arrays["joints_camera"],
+            arrays["joints_3d"],
             preview_path,
             fps,
-            nearer_positive=False,
-            avatar_title="B - learned Gravity-View v5",
+            nearer_positive=True,
+            avatar_title="B - detector-safe residual v7",
         )
     write_json_atomic(
         manifest_path,

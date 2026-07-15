@@ -43,10 +43,12 @@ the raw frame count alone.
 
 ## Recommendation
 
-Use the existing **6 layers x 384 hidden, 11,708,316 parameter** model in
-`configs/train-small.yaml` for the current `core` corpus. It is large enough for
-the 22-joint temporal mapping while leaving a sensible regularization margin
-for roughly 47.8k training clips.
+Use the **6 layers x 384 hidden, 11,682,906 parameter** detector-safe residual
+model in `configs/train-residual-small.yaml` for the current `core` corpus. It
+is large enough for temporal denoising, root motion, and contact prediction
+while leaving a sensible regularization margin for roughly 47.8k training
+clips. The similarly sized full-pose v5 model remains a comparison only: its
+three-epoch canary was materially worse than the detector prior.
 
 Do not use the 12x512, 39,571,612-parameter paper-size configuration as the
 default for this corpus. It has 3.4 times as many parameters without 3.4 times

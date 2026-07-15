@@ -11,6 +11,17 @@ This repository contains training infrastructure, not trained weights. The
 default CLI behavior is deliberately safe: download and training commands only
 print a plan until `--execute` is supplied.
 
+## Video to detector-safe 3D demo
+
+![Source video, MediaPipe baseline, and residual v7 comparison](docs/assets/residual-v7-demo.gif)
+
+The left panel shows the source with the detected 2D rig, the middle panel is
+the neutral fixed-bone detector baseline, and the right panel is the v7
+detector-safe residual output. [Open the full H.264 MP4](docs/assets/residual-v7-demo.mp4).
+The demo was rendered from a local qualification checkpoint; trained weights
+are not included in this repository. Media provenance is recorded in
+[`docs/assets/README.md`](docs/assets/README.md).
+
 ## Quickstart: from clone to resumable training
 
 Run these commands in order. Commands without `--execute` are safe previews and
@@ -422,9 +433,56 @@ and may also replace `keypoints_2d` and `bbox`.
 
 ## Start motion training yourself
 
+### Detector-safe residual model (recommended)
+
+The first detector-conditioned v5 canary reduced its own validation loss but
+regressed pose from the 4.31 cm raw detector prior to 10.87 cm MPJPE and kept
+contact F1 at zero. Do not extend that run. The v7 residual model instead keeps
+the neutralized detector pose as an exact identity path and predicts only a
+bounded, confidence-gated 3D correction. Root motion, camera, and contacts stay
+separate heads. Its untrained pose starts at the neutral detector baseline
+rather than a random full-body reconstruction.
+
+Preview the isolated three-epoch residual canary, then execute it explicitly:
+
+```sh
+./scripts/train-residual-canary.sh
+./scripts/train-residual-canary.sh --execute
+```
+
+For a longer fresh run or a later resume use the production residual output:
+
+```sh
+./scripts/train-residual-small.sh --max-epochs 3 --resume never
+./scripts/train-residual-small.sh --execute --max-epochs 3 --resume never
+./scripts/train-residual-small.sh --execute --max-epochs 10
+```
+
+The residual checkpoint contract is version 7 and uses isolated
+`motion-small-v3-residual*` outputs. It cannot resume v5 or older checkpoints.
+Validation reports both raw and neutralized detector MPJPE; positive
+`neutral_gain` is the required pose-quality gate. The lowest-MPJPE checkpoint
+is preserved separately as `best-pose.pt`; `best.pt` continues to track the
+aggregate validation objective. Root velocity starts at stationary, is bounded
+to the audited motion range, and contact BCE uses per-class corpus balance.
+`accel_gain` compares temporal acceleration error against the neutral detector
+on exactly the same valid joint frames; a positive value is required before
+claiming that the learned correction makes animation smoother.
+
+The recorded v7 qualification run completed 46 held-out validations after the
+three-epoch canary and a time-bounded continuation. Its best-pose checkpoint
+reached 2.68 cm MPJPE versus 4.31 cm for the raw detector, with 17.38 cm local
+root drift, contact F1 0.433, and `accel_gain=+39.98 m/s^2`. This passes the
+held-out pose and smoothness gates. On the 12-second real detector reference,
+however, the aggregate checkpoint still travelled an implausible 4.16 m and no
+contact probability crossed 0.5. Treat root/world grounding and contacts as a
+remaining detector-domain gap; do not qualify or release the checkpoint from
+synthetic holdout metrics alone.
+
 ### Smaller 11.7M-parameter v2 baseline
 
-The recommended model for the current approximately 31--32 hour `core` corpus
+The full-pose v5 model remains a controlled comparison for the current
+approximately 31--32 hour `core` corpus. It
 keeps the paper config's dataset, seed,
 split, augmentations, optimizer, validation, and early stopping unchanged. It
 changes only the Transformer from 12x512 (39.6M parameters) to 6x384 (11.7M)
@@ -439,8 +497,8 @@ Preview and then start its first three-epoch session:
 ./scripts/train-small.sh --execute --max-epochs 3 --resume never
 ```
 
-The isolated three-epoch canary has a dedicated wrapper and is also dry-run by
-default:
+Its isolated three-epoch canary has a dedicated wrapper and is also dry-run by
+default, but should not be extended after the recorded regression:
 
 ```sh
 ./scripts/train-v2-canary.sh

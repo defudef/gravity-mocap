@@ -15,9 +15,10 @@ from torch import nn
 
 from .schema import stable_hash
 
-CHECKPOINT_VERSION = 5
+CHECKPOINT_VERSION = 7
 LATEST_CHECKPOINT = "latest.pt"
 BEST_CHECKPOINT = "best.pt"
+BEST_POSE_CHECKPOINT = "best-pose.pt"
 STATE_FILE = "training-state.json"
 
 
@@ -33,6 +34,8 @@ class TrainingProgress:
     mlflow_run_id: str | None = None
     best_validation_loss: float | None = None
     best_validation_epoch: int | None = None
+    best_pose_mpjpe_m: float | None = None
+    best_pose_epoch: int | None = None
     validations_without_improvement: int = 0
 
 
@@ -41,6 +44,7 @@ def cleanup_stale_checkpoint_temps(output: Path) -> list[Path]:
     candidates = [
         output / f"{LATEST_CHECKPOINT}.tmp",
         output / f"{BEST_CHECKPOINT}.tmp",
+        output / f"{BEST_POSE_CHECKPOINT}.tmp",
         output / f"{STATE_FILE}.tmp",
         *output.glob("epoch-*.pt.tmp"),
     ]
@@ -267,6 +271,18 @@ def promote_best_checkpoint(output: Path) -> Path:
     if not latest.is_file():
         raise RuntimeError(f"Cannot promote missing checkpoint: {latest}")
     best = output / BEST_CHECKPOINT
+    temporary = best.with_suffix(best.suffix + ".tmp")
+    shutil.copy2(latest, temporary)
+    os.replace(temporary, best)
+    return best
+
+
+def promote_best_pose_checkpoint(output: Path) -> Path:
+    """Atomically preserve the checkpoint with the lowest held-out pose error."""
+    latest = output / LATEST_CHECKPOINT
+    if not latest.is_file():
+        raise RuntimeError(f"Cannot promote missing checkpoint: {latest}")
+    best = output / BEST_POSE_CHECKPOINT
     temporary = best.with_suffix(best.suffix + ".tmp")
     shutil.copy2(latest, temporary)
     os.replace(temporary, best)

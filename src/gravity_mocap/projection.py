@@ -40,8 +40,11 @@ def denormalize_bbox_keypoints(bbox_xy: Tensor, bbox: Tensor) -> Tensor:
 
 
 def project_motion_to_frame(prediction: dict[str, Tensor], joints: Tensor) -> Tensor:
+    pose_orientation = prediction.get("local_rotations_6d")
+    if pose_orientation is None:
+        pose_orientation = prediction["gravity_view_orientation_6d"].unsqueeze(-2)
     camera_joints = camera_space_joints(
-        prediction["local_rotations_6d"],
+        pose_orientation,
         prediction["camera_orientation_6d"],
         joints,
     )

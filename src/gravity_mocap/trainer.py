@@ -26,6 +26,7 @@ from .checkpoint import (
     data_bom_hash,
     load_training_checkpoint,
     promote_best_checkpoint,
+    promote_best_pose_checkpoint,
     read_training_state,
     resolve_resume_path,
     save_training_checkpoint,
@@ -83,12 +84,33 @@ def load_config(path: Path) -> dict[str, Any]:
     if not 0 <= float(detector_world_3d["joint_dropout_probability"]) <= 1:
         raise ValueError("data.detector_world_3d.joint_dropout_probability must be in [0, 1]")
     model_uses_world_3d = bool(config["model"].get("use_detector_world_3d", False))
+    model_config = config["model"]
+    model_config.setdefault("pose_representation", "rotations")
+    model_config.setdefault("max_detector_residual_meters", 0.12)
+    model_config.setdefault("residual_confidence_floor", 0.25)
+    model_config.setdefault("max_root_speed_mps", 5.0)
+    if model_config["pose_representation"] not in {"rotations", "detector_residual"}:
+        raise ValueError("model.pose_representation must be rotations or detector_residual")
+    if float(model_config["max_detector_residual_meters"]) <= 0:
+        raise ValueError("model.max_detector_residual_meters must be positive")
+    if not 0 <= float(model_config["residual_confidence_floor"]) <= 1:
+        raise ValueError("model.residual_confidence_floor must be in [0, 1]")
+    if float(model_config["max_root_speed_mps"]) <= 0:
+        raise ValueError("model.max_root_speed_mps must be positive")
     if model_uses_world_3d != bool(detector_world_3d["enabled"]):
         raise ValueError(
             "model.use_detector_world_3d and data.detector_world_3d.enabled must match"
         )
     if model_uses_world_3d and not bool(data_config["gravity_view_contract"]):
         raise ValueError("detector world 3D requires data.gravity_view_contract: true")
+    if model_config["pose_representation"] == "detector_residual" and not model_uses_world_3d:
+        raise ValueError("detector_residual pose requires detector world 3D")
+    positive_weight = config["loss"].get("contacts_positive_weight", 1.0)
+    if isinstance(positive_weight, list):
+        if len(positive_weight) != 6 or any(float(value) <= 0 for value in positive_weight):
+            raise ValueError("loss.contacts_positive_weight must contain six positive values")
+    elif float(positive_weight) <= 0:
+        raise ValueError("loss.contacts_positive_weight must be positive")
     augmentation = data_config.setdefault("augmentation", {"enabled": False})
     augmentation.setdefault("enabled", False)
     probability_names = (
@@ -403,6 +425,26 @@ def _restore_legacy_validation_progress(
     return True
 
 
+def _restore_pose_validation_progress(progress: TrainingProgress, output: Path) -> bool:
+    """Seed best-pose tracking when resuming a checkpoint that predates it."""
+    if progress.best_pose_mpjpe_m is not None:
+        return False
+    path = output / "validation-state.json"
+    if not path.is_file():
+        return False
+    try:
+        state = json.loads(path.read_text(encoding="utf-8"))
+        epoch = int(state["epoch"])
+        value = float(state["metrics"]["mpjpe_m"])
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError, OSError):
+        return False
+    if epoch != progress.next_epoch - 1 or not math.isfinite(value):
+        return False
+    progress.best_pose_mpjpe_m = value
+    progress.best_pose_epoch = epoch
+    return True
+
+
 def _device(value: str) -> torch.device:
     if value != "auto":
         return torch.device(value)
@@ -601,12 +643,15 @@ def run_training(
             "resumed_from": resumed_from,
         }
     restored_legacy_best = False
+    restored_pose_best = False
     if resume_path is not None and bool(early_stopping["enabled"]):
         restored_legacy_best = _restore_legacy_validation_progress(
             progress,
             output,
             monitor=str(early_stopping["monitor"]),
         )
+    if resume_path is not None:
+        restored_pose_best = _restore_pose_validation_progress(progress, output)
     progress.complete = False
     progress.stop_reason = None
 
@@ -656,6 +701,19 @@ def run_training(
             epoch=progress.best_validation_epoch,
             validation_loss=progress.best_validation_loss,
         )
+    if (
+        restored_pose_best
+        and resume_path is not None
+        and resume_path.resolve() == (output / LATEST_CHECKPOINT).resolve()
+    ):
+        best_pose_path = promote_best_pose_checkpoint(output)
+        assert progress.best_pose_mpjpe_m is not None
+        assert progress.best_pose_epoch is not None
+        logger.best_pose_checkpoint(
+            best_pose_path,
+            epoch=progress.best_pose_epoch,
+            mpjpe_m=progress.best_pose_mpjpe_m,
+        )
 
     def save_progress(
         *,
@@ -678,6 +736,8 @@ def run_training(
             mlflow_run_id=progress.mlflow_run_id,
             best_validation_loss=progress.best_validation_loss,
             best_validation_epoch=progress.best_validation_epoch,
+            best_pose_mpjpe_m=progress.best_pose_mpjpe_m,
+            best_pose_epoch=progress.best_pose_epoch,
             validations_without_improvement=progress.validations_without_improvement,
         )
         checkpoint_path = save_training_checkpoint(
@@ -703,6 +763,7 @@ def run_training(
                 epoch_metric_sums: dict[str, float] = {}
                 epoch_metric_steps = 0
                 validation_improved = False
+                pose_improved = False
                 dataset.set_epoch(epoch)
                 all_batches = _epoch_batches(len(dataset), batch_size, seed, epoch)
                 start_batch = progress.next_batch if epoch == progress.next_epoch else 0
@@ -837,6 +898,14 @@ def run_training(
                         device,
                         use_amp=use_amp,
                     )
+                    pose_mpjpe_m = float(validation_metrics["mpjpe_m"])
+                    if (
+                        progress.best_pose_mpjpe_m is None
+                        or pose_mpjpe_m < progress.best_pose_mpjpe_m
+                    ):
+                        progress.best_pose_mpjpe_m = pose_mpjpe_m
+                        progress.best_pose_epoch = epoch
+                        pose_improved = True
                     if bool(early_stopping["enabled"]):
                         monitor = str(early_stopping["monitor"])
                         validation_improved = _update_early_stopping(
@@ -905,6 +974,10 @@ def run_training(
                                 "patience": early_stopping["patience"],
                                 "min_delta": early_stopping["min_delta"],
                             },
+                            "best_pose": {
+                                "mpjpe_m": progress.best_pose_mpjpe_m,
+                                "epoch": progress.best_pose_epoch,
+                            },
                         },
                     )
                 if epoch < epochs and stop.reason is None:
@@ -931,6 +1004,14 @@ def run_training(
                         best_path,
                         epoch=progress.best_validation_epoch,
                         validation_loss=progress.best_validation_loss,
+                    )
+                if pose_improved:
+                    best_pose_path = promote_best_pose_checkpoint(output)
+                    assert progress.best_pose_mpjpe_m is not None
+                    logger.best_pose_checkpoint(
+                        best_pose_path,
+                        epoch=epoch,
+                        mpjpe_m=progress.best_pose_mpjpe_m,
                     )
                 if epoch % int(config["train"]["checkpoint_every"]) == 0:
                     archive_latest_checkpoint(

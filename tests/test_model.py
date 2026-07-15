@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import torch
 
 from gravity_mocap.data import MotionWindowDataset
@@ -7,6 +8,8 @@ from gravity_mocap.fixture import create_fixture
 from gravity_mocap.losses import compute_losses
 from gravity_mocap.metrics import compute_motion_metrics
 from gravity_mocap.model import GravityViewMotionModel
+from gravity_mocap.rotations import retarget_joints_to_neutral_skeleton
+from gravity_mocap.skeleton import SKELETON
 from gravity_mocap.trainer import build_model, evaluate_model, load_config
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +73,32 @@ def test_forward_and_losses_are_finite_without_training(tmp_path: Path) -> None:
         metrics
     )
     assert all(torch.isfinite(value) for value in metrics.values())
+
+
+def test_detector_acceleration_gain_uses_the_same_valid_frames() -> None:
+    frames = 4
+    joints = torch.zeros((1, frames, 22, 3), dtype=torch.float32)
+    joints[:, :, :, 1] = torch.tensor([0.0, 0.1, 0.4, 0.9]).view(1, frames, 1)
+    prediction = {
+        "joints_3d": retarget_joints_to_neutral_skeleton(joints),
+        "root_velocity_local": torch.zeros((1, frames, 3)),
+        "contacts": torch.full((1, frames, 6), -10.0),
+    }
+    target = {
+        "joints_3d": torch.zeros_like(joints),
+        "root_velocity_local": torch.zeros((1, frames, 3)),
+        "contacts": torch.zeros((1, frames, 6)),
+        "frame_mask": torch.ones((1, frames)),
+        "detector_joints_3d": joints,
+        "detector_3d_confidence": torch.ones((1, frames, 22)),
+    }
+
+    metrics = compute_motion_metrics(prediction, target, fps=30)
+
+    assert metrics["detector_neutral_acceleration_error_mps2"] == pytest.approx(
+        metrics["acceleration_error_on_detector_frames_mps2"]
+    )
+    assert metrics["acceleration_gain_vs_detector_neutral_mps2"] == pytest.approx(0.0)
 
 
 def test_motion_targets_are_fk_consistent_and_reprojection_stays_active(
@@ -168,3 +197,90 @@ def test_held_out_evaluation_is_forward_only_and_reports_motion_metrics(tmp_path
     assert "root_local_drift_m" in metrics
     assert all(torch.isfinite(torch.tensor(value)) for value in metrics.values())
     assert all(parameter.grad is None for parameter in model.parameters())
+
+
+def test_detector_residual_pose_starts_as_safe_neutral_prior(tmp_path: Path) -> None:
+    create_fixture(tmp_path / "synthetic/walk.npz", frames=8, image_feature_dim=32)
+    detector_config = {
+        "enabled": True,
+        "noise_std_meters": 0.02,
+        "confidence_min": 0.5,
+        "joint_dropout_probability": 0.05,
+    }
+    dataset = MotionWindowDataset(
+        tmp_path,
+        sequence_length=8,
+        stride=8,
+        gravity_view_contract=True,
+        detector_world_3d=detector_config,
+    )
+    batch = {name: value.unsqueeze(0) for name, value in dataset[0].items()}
+    model = GravityViewMotionModel(
+        image_feature_dim=32,
+        hidden_dim=64,
+        layers=2,
+        heads=4,
+        mlp_ratio=2,
+        dropout=0,
+        attention_radius=8,
+        use_detector_world_3d=True,
+        pose_representation="detector_residual",
+    ).eval()
+
+    with torch.no_grad():
+        prediction = model(batch)
+    expected = retarget_joints_to_neutral_skeleton(batch["detector_joints_3d"])
+
+    assert "local_rotations_6d" not in prediction
+    assert torch.equal(prediction["detector_residual_3d"], torch.zeros_like(expected))
+    assert torch.allclose(prediction["joints_3d"], expected, atol=1e-6)
+    assert torch.equal(
+        prediction["root_velocity_local"],
+        torch.zeros_like(prediction["root_velocity_local"]),
+    )
+    assert torch.equal(prediction["contacts"], torch.zeros_like(prediction["contacts"]))
+    bone_lengths = torch.linalg.vector_norm(
+        prediction["joints_3d"][..., 1:, :] - prediction["joints_3d"][..., SKELETON.parents[1:], :],
+        dim=-1,
+    )
+    expected_lengths = torch.linalg.vector_norm(torch.from_numpy(SKELETON.rest_offsets[1:]), dim=-1)
+    assert torch.allclose(bone_lengths, expected_lengths, atol=1e-6)
+
+
+def test_detector_residual_is_bounded_by_confidence() -> None:
+    model = GravityViewMotionModel(
+        image_feature_dim=8,
+        hidden_dim=32,
+        layers=1,
+        heads=4,
+        mlp_ratio=2,
+        dropout=0,
+        attention_radius=8,
+        use_detector_world_3d=True,
+        pose_representation="detector_residual",
+        max_detector_residual_meters=0.12,
+        residual_confidence_floor=0.25,
+    ).eval()
+    model.heads["detector_residual_3d"].bias.data.fill_(10.0)
+    model.heads["root_velocity_local"].bias.data.fill_(100.0)
+    batch = {
+        "bbox": torch.zeros(1, 2, 4),
+        "keypoints_2d": torch.zeros(1, 2, 22, 3),
+        "image_features": torch.zeros(1, 2, 8),
+        "image_mask": torch.zeros(1, 2),
+        "camera_delta_6d": torch.zeros(1, 2, 6),
+        "detector_joints_3d": torch.zeros(1, 2, 22, 3),
+        "detector_3d_confidence": torch.stack((torch.ones(22), torch.zeros(22)), dim=0).unsqueeze(
+            0
+        ),
+    }
+
+    with torch.no_grad():
+        prediction = model(batch)
+        residual = prediction["detector_residual_3d"]
+
+    assert residual[0, 0, 1, 0] == pytest.approx(0.03, abs=1e-5)
+    assert residual[0, 1, 1, 0] == pytest.approx(0.12, abs=1e-5)
+    assert torch.equal(residual[..., 0, :], torch.zeros_like(residual[..., 0, :]))
+    speed = torch.linalg.vector_norm(prediction["root_velocity_local"], dim=-1)
+    assert torch.all(speed <= 5.0 + 1e-5)

@@ -14,6 +14,7 @@ from gravity_mocap.checkpoint import (
     compatibility_hash,
     load_training_checkpoint,
     promote_best_checkpoint,
+    promote_best_pose_checkpoint,
     read_training_state,
     resolve_resume_path,
     save_training_checkpoint,
@@ -23,6 +24,7 @@ from gravity_mocap.schema import read_shard, write_shard
 from gravity_mocap.trainer import (
     _epoch_session_limit_reached,
     _restore_legacy_validation_progress,
+    _restore_pose_validation_progress,
     _update_early_stopping,
     _validate_session_limits,
     build_model,
@@ -54,6 +56,8 @@ def test_checkpoint_round_trip_restores_full_state_without_training(tmp_path: Pa
         mlflow_run_id="test-run-id",
         best_validation_loss=0.42,
         best_validation_epoch=6,
+        best_pose_mpjpe_m=0.05,
+        best_pose_epoch=5,
         validations_without_improvement=1,
     )
     random.seed(10)
@@ -205,10 +209,18 @@ def test_cleanup_removes_only_uncommitted_checkpoint_temps(tmp_path: Path) -> No
     archive_temp.write_bytes(b"partial")
     best_temp = tmp_path / "best.pt.tmp"
     best_temp.write_bytes(b"partial")
+    best_pose_temp = tmp_path / "best-pose.pt.tmp"
+    best_pose_temp.write_bytes(b"partial")
 
     removed = cleanup_stale_checkpoint_temps(tmp_path)
 
-    assert set(removed) == {latest_temp, best_temp, state_temp, archive_temp}
+    assert set(removed) == {
+        latest_temp,
+        best_temp,
+        best_pose_temp,
+        state_temp,
+        archive_temp,
+    }
     assert latest.read_bytes() == b"valid"
     assert all(not path.exists() for path in removed)
 
@@ -224,6 +236,17 @@ def test_best_checkpoint_is_promoted_atomically(tmp_path: Path) -> None:
     assert best == stale_best
     assert best.read_bytes() == b"best-model-state"
     assert not (tmp_path / "best.pt.tmp").exists()
+
+
+def test_best_pose_checkpoint_is_promoted_separately(tmp_path: Path) -> None:
+    latest = tmp_path / "latest.pt"
+    latest.write_bytes(b"best-pose-state")
+
+    best_pose = promote_best_pose_checkpoint(tmp_path)
+
+    assert best_pose == tmp_path / "best-pose.pt"
+    assert best_pose.read_bytes() == b"best-pose-state"
+    assert not (tmp_path / "best-pose.pt.tmp").exists()
 
 
 def test_training_plan_never_constructs_an_optimizer(
@@ -336,6 +359,17 @@ def test_legacy_validation_state_seeds_resumable_early_stopping(tmp_path: Path) 
     assert progress.best_validation_loss == 0.25
     assert progress.best_validation_epoch == 3
     assert progress.validations_without_improvement == 0
+
+
+def test_validation_state_seeds_resumable_best_pose(tmp_path: Path) -> None:
+    (tmp_path / "validation-state.json").write_text('{"epoch": 3, "metrics": {"mpjpe_m": 0.041}}')
+    progress = TrainingProgress(next_epoch=4)
+
+    restored = _restore_pose_validation_progress(progress, tmp_path)
+
+    assert restored is True
+    assert progress.best_pose_mpjpe_m == 0.041
+    assert progress.best_pose_epoch == 3
 
 
 def test_early_stopping_config_is_validated(tmp_path: Path) -> None:

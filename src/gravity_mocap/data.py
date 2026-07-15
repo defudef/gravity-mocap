@@ -149,7 +149,9 @@ def _create_detector_world_3d_inputs(
             config.get("joint_dropout_probability", 0.0)
         )
         dropout &= frame_valid[:, None]
-        joints[dropout] = 0.0
+        # MediaPipe still emits a 3D estimate when visibility is low. Keep that
+        # estimate as the residual model's safe prior and communicate the
+        # uncertainty exclusively through confidence.
         confidence[dropout] = 0.0
     joints[~frame_valid] = 0.0
     confidence[~frame_valid] = 0.0

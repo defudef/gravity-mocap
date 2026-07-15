@@ -163,6 +163,15 @@ class ProgressLogger:
         loss = "?" if validation_loss is None else f"{validation_loss:.6f}"
         self._write(f"[checkpoint] best={path} | epoch={epoch} | val_loss={loss}")
 
+    def best_pose_checkpoint(
+        self,
+        path: Path,
+        *,
+        epoch: int,
+        mpjpe_m: float,
+    ) -> None:
+        self._write(f"[checkpoint] best_pose={path} | epoch={epoch} | MPJPE={mpjpe_m * 100:.2f}cm")
+
     def validation_start(self, *, epoch: int, epochs: int, windows: int) -> None:
         self._write(f"[validation] START | epoch {epoch}/{epochs} | windows={windows:,}")
 
@@ -197,6 +206,20 @@ class ProgressLogger:
             parts.insert(
                 5,
                 f"MPJPE_gain={metrics['mpjpe_gain_vs_detector_m'] * 100:+.2f}cm",
+            )
+        if "detector_neutral_mpjpe_m" in metrics:
+            parts.insert(
+                5,
+                f"neutral_prior={metrics['detector_neutral_mpjpe_m'] * 100:.2f}cm",
+            )
+            parts.insert(
+                7,
+                f"neutral_gain={metrics['mpjpe_gain_vs_detector_neutral_m'] * 100:+.2f}cm",
+            )
+        if "acceleration_gain_vs_detector_neutral_mps2" in metrics:
+            parts.insert(
+                -3,
+                f"accel_gain={metrics['acceleration_gain_vs_detector_neutral_mps2']:+.2f}m/s^2",
             )
         if best_loss is not None:
             parts.append(f"best={best_loss:.6f}")
