@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from gravity_mocap import mesh_avatar
@@ -18,6 +19,21 @@ def test_bundled_gray_avatar_has_pinned_cc0_provenance() -> None:
         "license_id": "CC0-1.0",
         "source_url": "https://quaternius.com/packs/universalbasecharacters.html",
     }
+
+
+def test_canonical_to_blender_preserves_left_right_screen_direction() -> None:
+    canonical = np.asarray(
+        [
+            [1.0, 2.0, 3.0],
+            [-1.0, 2.0, 3.0],
+        ],
+        dtype=np.float32,
+    )
+
+    converted = mesh_avatar.canonical_to_blender_joints(canonical)
+
+    assert converted.tolist() == [[1.0, -3.0, 2.0], [-1.0, -3.0, 2.0]]
+    assert converted[0, 0] > converted[1, 0]
 
 
 def test_avatar_renderer_selection_is_explicit_and_fail_closed(

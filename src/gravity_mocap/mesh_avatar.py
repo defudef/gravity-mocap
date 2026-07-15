@@ -72,6 +72,21 @@ def avatar_provenance() -> dict[str, str]:
     }
 
 
+def canonical_to_blender_joints(joints: np.ndarray) -> np.ndarray:
+    """Convert viewer-right/Y-up canonical joints into Blender's stage axes."""
+    source = np.asarray(joints, dtype=np.float32)
+    if source.shape[-1:] != (3,):
+        raise ValueError(f"Expected joint coordinates ending in 3 values, got {source.shape}")
+    converted = np.empty_like(source)
+    # Both the canonical rig and Quaternius use +X for the character's left
+    # side. Keeping X unchanged also preserves the procedural preview's screen
+    # direction. Blender Z is up and its stage camera looks along positive Y.
+    converted[..., 0] = source[..., 0]
+    converted[..., 1] = -source[..., 2]
+    converted[..., 2] = source[..., 1]
+    return converted
+
+
 def render_mesh_avatar_frames(
     joints_3d: np.ndarray,
     output_dir: Path,
@@ -104,7 +119,7 @@ def render_mesh_avatar_frames(
     with motion_path.open("wb") as handle:
         np.savez_compressed(
             handle,
-            joints_3d=joints,
+            joints_blender=canonical_to_blender_joints(joints),
             joint_names=np.asarray(SKELETON.names),
         )
     command = [

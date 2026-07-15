@@ -86,21 +86,15 @@ def _reset_scene() -> None:
 
 def _load_motion(path: Path) -> np.ndarray:
     with np.load(path, allow_pickle=False) as archive:
-        joints = np.asarray(archive["joints_3d"], dtype=np.float32)
+        joints = np.asarray(archive["joints_blender"], dtype=np.float32)
         names = tuple(str(name) for name in archive["joint_names"].tolist())
     if joints.ndim != 3 or joints.shape[1:] != (len(JOINT_NAMES), 3):
-        raise RuntimeError(f"Expected joints_3d shaped (T, 22, 3), got {joints.shape}")
+        raise RuntimeError(f"Expected joints_blender shaped (T, 22, 3), got {joints.shape}")
     if names != JOINT_NAMES:
         raise RuntimeError("Motion joint_names do not match the canonical 22-joint order")
     if len(joints) == 0 or not np.isfinite(joints).all():
         raise RuntimeError("Motion must contain finite joints and at least one frame")
-    # Canonical X is viewer-right, Y is up, and Z is forward. Quaternius uses
-    # Blender X with the opposite handedness, Z-up, and negative Y forward.
-    converted = np.empty_like(joints)
-    converted[..., 0] = -joints[..., 0]
-    converted[..., 1] = -joints[..., 2]
-    converted[..., 2] = joints[..., 1]
-    return converted
+    return joints
 
 
 def _frame(right: Vector, up: Vector) -> Matrix:

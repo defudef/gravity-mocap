@@ -7,7 +7,7 @@ import numpy as np
 
 from .skeleton import SKELETON
 
-AVATAR_RENDER_VERSION = 3
+AVATAR_RENDER_VERSION = 4
 
 _INDEX = {name: index for index, name in enumerate(SKELETON.names)}
 _OUTLINE = (38, 39, 52)
