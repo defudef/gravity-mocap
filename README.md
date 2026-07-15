@@ -453,6 +453,34 @@ approved shards have been generated and audited; once enabled it also requires
 at least 10% source-shard coverage instead of silently training on a token
 single-sidecar sample.
 
+Use the batch command to reach that coverage without hand-picking easy or short
+clips. It ranks shards deterministically, rounds coverage up independently for
+each `core` source, and interleaves CMU, AddBiomechanics, and 100STYLE so a
+bounded partial session is not single-source. Planning is read-only:
+
+```sh
+./scripts/video.sh generate-detector-loop-batch
+```
+
+Generation is resumable and idempotent. The default keeps only verified
+sidecars plus `detector-loop/batch-manifest.json`; large PNG, MP4, and detector
+intermediates are removed after each atomic sidecar. A time limit is checked
+between source shards, so the current shard is always allowed to finish:
+
+```sh
+# One short selected shard from each core source.
+./scripts/video.sh generate-detector-loop-batch --max-shards 3 --execute
+
+# Continue the same stable 10% selection for at most one bounded session.
+./scripts/video.sh generate-detector-loop-batch --max-hours 8 --execute
+```
+
+Pass `--keep-work` only when debugging a renderer or detector failure. Repeating
+the command revalidates compatible sidecars and continues the same selection;
+changing the coverage, seed, render dimensions, core inventory, or generator
+version produces a different auditable plan. This command prepares detector
+inputs only and never starts model training.
+
 The clean projection is also deterministic and configurable in
 `configs/datasets.yaml` under `preprocessing.synthetic_camera`: initial camera
 yaw/pitch/roll, distance, and offsets are sampled per sequence, then receive a

@@ -2,14 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
+import time
 from dataclasses import dataclass
+from datetime import UTC, datetime
+from hashlib import sha256
+from math import ceil
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from .adapters import FORBIDDEN_PARAMETRIC_BODY_KEYS
-from .artifacts import write_npz_atomic
+from .artifacts import write_json_atomic, write_npz_atomic
 from .catalog import DatasetCatalog
 from .data import convert_targets_to_gravity_view
 from .mesh_avatar import avatar_provenance, render_mesh_avatar_frames
@@ -21,6 +26,8 @@ from .world3d import load_detector_world_3d, prepare_detector_world_3d
 DETECTOR_LOOP_VERSION = 1
 DETECTOR_LOOP_GENERATOR_VERSION = 4
 DETECTOR_LOOP_SUFFIX = ".detector-loop.npz"
+DETECTOR_LOOP_BATCH_VERSION = 1
+DETECTOR_LOOP_BATCH_MANIFEST = "batch-manifest.json"
 
 
 @dataclass(frozen=True)
@@ -37,6 +44,16 @@ class DetectorLoopSidecar:
     @property
     def frames(self) -> int:
         return int(self.frame_mask.shape[0])
+
+
+@dataclass(frozen=True)
+class DetectorLoopBatchCandidate:
+    """Small, portable inventory row used for deterministic batch selection."""
+
+    relative_path: str
+    source_id: str
+    frames: int
+    source_provenance_hash: str
 
 
 def _validate_sidecar(sidecar: DetectorLoopSidecar) -> DetectorLoopSidecar:
@@ -386,6 +403,374 @@ def detector_loop_generation_plan(
         "output_root": str(root),
         "sidecar": str(root / f"{source_hash}{DETECTOR_LOOP_SUFFIX}"),
         "render_size": [width, height],
+    }
+
+
+def select_detector_loop_candidates(
+    candidates: list[DetectorLoopBatchCandidate],
+    *,
+    coverage_fraction: float,
+    selection_seed: int,
+) -> list[DetectorLoopBatchCandidate]:
+    """Select a stable ceil-per-source sample and interleave sources for partial runs."""
+    if not 0 < coverage_fraction <= 1:
+        raise ValueError("Detector-loop batch coverage must be in (0, 1]")
+    if not candidates:
+        raise ValueError("Detector-loop batch inventory is empty")
+    relative_paths = [candidate.relative_path for candidate in candidates]
+    if len(set(relative_paths)) != len(relative_paths):
+        raise ValueError("Detector-loop batch inventory contains duplicate relative paths")
+
+    grouped: dict[str, list[tuple[str, DetectorLoopBatchCandidate]]] = {}
+    for candidate in candidates:
+        identity = (
+            f"detector-loop-batch-v{DETECTOR_LOOP_BATCH_VERSION}:"
+            f"{selection_seed}:{candidate.source_id}:{candidate.relative_path}"
+        )
+        rank = sha256(identity.encode("utf-8")).hexdigest()
+        grouped.setdefault(candidate.source_id, []).append((rank, candidate))
+
+    selected_by_source: dict[str, list[DetectorLoopBatchCandidate]] = {}
+    for source_id, ranked in grouped.items():
+        ranked.sort(key=lambda item: (item[0], item[1].relative_path))
+        count = ceil(len(ranked) * coverage_fraction)
+        chosen = [candidate for _, candidate in ranked[:count]]
+        # Membership remains hash-random; processing shorter selected shards first
+        # keeps a smoke or interrupted preparation session usefully bounded.
+        selected_by_source[source_id] = sorted(
+            chosen, key=lambda candidate: (candidate.frames, candidate.relative_path)
+        )
+
+    # A bounded session should not accidentally process one source exclusively.
+    interleaved: list[DetectorLoopBatchCandidate] = []
+    max_items = max(len(items) for items in selected_by_source.values())
+    for offset in range(max_items):
+        for source_id in sorted(selected_by_source):
+            items = selected_by_source[source_id]
+            if offset < len(items):
+                interleaved.append(items[offset])
+    return interleaved
+
+
+def _batch_candidate(path: Path, processed_root: Path) -> DetectorLoopBatchCandidate:
+    with np.load(path, allow_pickle=False) as archive:
+        required = {"frame_mask", "provenance_json"}
+        missing = sorted(required - set(archive.files))
+        if missing:
+            raise ValueError(f"{path}: training shard is missing: {', '.join(missing)}")
+        forbidden = sorted(
+            name
+            for name in archive.files
+            if any(token in name.lower() for token in FORBIDDEN_PARAMETRIC_BODY_KEYS)
+        )
+        if forbidden:
+            raise ValueError(f"{path}: training shard contains prohibited fields: {forbidden}")
+        provenance = json.loads(str(np.asarray(archive["provenance_json"]).item()))
+        frames = int(archive["frame_mask"].shape[0])
+    metadata = dict(provenance)
+    stored_provenance_hash = metadata.pop("provenance_hash", None)
+    if stored_provenance_hash != stable_hash(metadata):
+        raise ValueError(f"{path}: source shard provenance hash is invalid")
+    if frames < 2:
+        raise ValueError(f"{path}: source shard needs at least two frames")
+    fps = float(provenance.get("fps", 30.0))
+    if not np.isclose(fps, 30.0):
+        raise ValueError(f"{path}: detector-loop generation requires canonical 30 FPS shards")
+    return DetectorLoopBatchCandidate(
+        relative_path=path.relative_to(processed_root).as_posix(),
+        source_id=str(provenance.get("source_id")),
+        frames=frames,
+        source_provenance_hash=str(stored_provenance_hash),
+    )
+
+
+def _compatible_generated_sidecar(
+    sidecar: DetectorLoopSidecar,
+    candidate: DetectorLoopBatchCandidate,
+    *,
+    width: int,
+    height: int,
+) -> bool:
+    generator = sidecar.provenance.get("generator") or {}
+    return bool(
+        sidecar.source_provenance_hash == candidate.source_provenance_hash
+        and sidecar.frames == candidate.frames
+        and generator.get("version") == DETECTOR_LOOP_GENERATOR_VERSION
+        and generator.get("render_width") == width
+        and generator.get("render_height") == height
+    )
+
+
+def detector_loop_batch_plan(
+    processed_root: Path,
+    output_root: Path,
+    *,
+    catalog_path: Path,
+    data_root: Path,
+    profile: str = "core",
+    coverage_fraction: float = 0.1,
+    selection_seed: int = 8088,
+    width: int = 512,
+    height: int = 512,
+) -> dict[str, Any]:
+    """Build a read-only, source-stratified plan for detector-loop sidecars."""
+    saved_root = data_root.expanduser().resolve()
+    processed = processed_root.expanduser().resolve()
+    root = output_root.expanduser().resolve()
+    if not processed.is_dir() or not processed.is_relative_to(saved_root):
+        raise ValueError("Detector-loop processed root must exist below Saved/GravityMocap")
+    if not root.is_relative_to(saved_root):
+        raise ValueError("Detector-loop outputs must stay below Saved/GravityMocap")
+    if width < 256 or height < 256:
+        raise ValueError("Detector-loop renders must be at least 256x256")
+    if profile != "core":
+        raise ValueError("Detector-loop batches are restricted to the official core profile")
+
+    catalog = DatasetCatalog(catalog_path)
+    entries = {entry.dataset_id: entry for entry in catalog.profile(profile)}
+    candidates: list[DetectorLoopBatchCandidate] = []
+    skipped_by_source: dict[str, int] = {}
+    for path in sorted(processed.rglob("*.npz")):
+        with np.load(path, allow_pickle=False) as archive:
+            if "provenance_json" not in archive.files:
+                raise ValueError(f"{path}: training shard is missing provenance_json")
+            provenance = json.loads(str(np.asarray(archive["provenance_json"]).item()))
+        source_id = str(provenance.get("source_id"))
+        if source_id not in entries:
+            skipped_by_source[source_id] = skipped_by_source.get(source_id, 0) + 1
+            continue
+        candidate = _batch_candidate(path, processed)
+        entry = entries[candidate.source_id]
+        if provenance.get("license_id") != entry.license_id:
+            raise ValueError(f"{path}: source shard license does not match the approved catalog")
+        candidates.append(candidate)
+
+    selected = select_detector_loop_candidates(
+        candidates,
+        coverage_fraction=coverage_fraction,
+        selection_seed=selection_seed,
+    )
+    sidecar_index = index_detector_loop_sidecars(root) if root.is_dir() else {}
+    items: list[dict[str, Any]] = []
+    source_hashes: set[str] = set()
+    for candidate in selected:
+        source_path = processed / candidate.relative_path
+        source_hash = file_sha256(source_path)
+        if source_hash in source_hashes:
+            raise ValueError("Detector-loop batch selection contains duplicate shard content")
+        source_hashes.add(source_hash)
+        indexed = sidecar_index.get(source_hash)
+        status = "pending"
+        if indexed is not None:
+            status = (
+                "ready"
+                if _compatible_generated_sidecar(
+                    indexed[1], candidate, width=width, height=height
+                )
+                else "stale"
+            )
+        items.append(
+            {
+                "source_shard": candidate.relative_path,
+                "source_shard_sha256": source_hash,
+                "source_provenance_hash": candidate.source_provenance_hash,
+                "source_id": candidate.source_id,
+                "frames": candidate.frames,
+                "sidecar": f"{source_hash}{DETECTOR_LOOP_SUFFIX}",
+                "status": status,
+            }
+        )
+
+    inventory_by_source: dict[str, dict[str, int]] = {}
+    for candidate in candidates:
+        stats = inventory_by_source.setdefault(candidate.source_id, {"shards": 0, "frames": 0})
+        stats["shards"] += 1
+        stats["frames"] += candidate.frames
+    selected_by_source: dict[str, dict[str, int]] = {}
+    for item in items:
+        stats = selected_by_source.setdefault(
+            str(item["source_id"]), {"shards": 0, "frames": 0, "ready": 0}
+        )
+        stats["shards"] += 1
+        stats["frames"] += int(item["frames"])
+        stats["ready"] += int(item["status"] == "ready")
+    pending = [item for item in items if item["status"] != "ready"]
+    return {
+        "schema_version": DETECTOR_LOOP_BATCH_VERSION,
+        "artifact_type": "gravity-mocap-detector-loop-batch-plan",
+        "detector_loop_version": DETECTOR_LOOP_VERSION,
+        "detector_loop_generator_version": DETECTOR_LOOP_GENERATOR_VERSION,
+        "profile": profile,
+        "catalog_sha256": file_sha256(catalog_path.expanduser().resolve()),
+        "processed_root": processed.relative_to(saved_root).as_posix(),
+        "output_root": root.relative_to(saved_root).as_posix(),
+        "coverage_fraction": float(coverage_fraction),
+        "selection_seed": int(selection_seed),
+        "selection_algorithm": "sha256-rank-ceil-per-source-interleaved-v1",
+        "render_size": [width, height],
+        "inventory_shards": len(candidates),
+        "inventory_frames": sum(candidate.frames for candidate in candidates),
+        "inventory_by_source": inventory_by_source,
+        "skipped_by_source": skipped_by_source,
+        "selected_shards": len(items),
+        "selected_frames": sum(int(item["frames"]) for item in items),
+        "selected_by_source": selected_by_source,
+        "ready_shards": sum(item["status"] == "ready" for item in items),
+        "remaining_shards": len(pending),
+        "remaining_frames": sum(int(item["frames"]) for item in pending),
+        "peak_transient_frames": max((int(item["frames"]) for item in pending), default=0),
+        "items": items,
+    }
+
+
+def detector_loop_batch_summary(plan: dict[str, Any]) -> dict[str, Any]:
+    summary = {key: value for key, value in plan.items() if key != "items"}
+    summary["selected_examples"] = [
+        {
+            "source_shard": item["source_shard"],
+            "source_id": item["source_id"],
+            "frames": item["frames"],
+            "status": item["status"],
+        }
+        for item in plan["items"][:6]
+    ]
+    return summary
+
+
+def _batch_progress(manifest: dict[str, Any]) -> tuple[int, int]:
+    ready = sum(item["status"] == "ready" for item in manifest["items"])
+    return ready, len(manifest["items"])
+
+
+def _refresh_batch_counts(manifest: dict[str, Any]) -> tuple[int, int]:
+    ready, total = _batch_progress(manifest)
+    manifest["ready_shards"] = ready
+    manifest["remaining_shards"] = total - ready
+    manifest["remaining_frames"] = sum(
+        int(item["frames"]) for item in manifest["items"] if item["status"] != "ready"
+    )
+    ready_by_source: dict[str, int] = {}
+    for item in manifest["items"]:
+        if item["status"] == "ready":
+            source_id = str(item["source_id"])
+            ready_by_source[source_id] = ready_by_source.get(source_id, 0) + 1
+    for source_id, stats in manifest["selected_by_source"].items():
+        stats["ready"] = ready_by_source.get(source_id, 0)
+    return ready, total
+
+
+def generate_detector_loop_batch(
+    processed_root: Path,
+    output_root: Path,
+    *,
+    catalog_path: Path,
+    data_root: Path,
+    profile: str = "core",
+    coverage_fraction: float = 0.1,
+    selection_seed: int = 8088,
+    width: int = 512,
+    height: int = 512,
+    max_hours: float | None = None,
+    max_shards: int | None = None,
+    keep_work: bool = False,
+) -> dict[str, Any]:
+    """Generate a resumable batch, enforcing the time limit between atomic sidecars."""
+    if max_hours is not None and max_hours <= 0:
+        raise ValueError("Detector-loop batch max_hours must be positive")
+    if max_shards is not None and max_shards <= 0:
+        raise ValueError("Detector-loop batch max_shards must be positive")
+    plan = detector_loop_batch_plan(
+        processed_root,
+        output_root,
+        catalog_path=catalog_path,
+        data_root=data_root,
+        profile=profile,
+        coverage_fraction=coverage_fraction,
+        selection_seed=selection_seed,
+        width=width,
+        height=height,
+    )
+    processed = processed_root.expanduser().resolve()
+    root = output_root.expanduser().resolve()
+    manifest_path = root / DETECTOR_LOOP_BATCH_MANIFEST
+    manifest = {
+        **plan,
+        "artifact_type": "gravity-mocap-detector-loop-batch-manifest",
+        "status": "running",
+        "session_generated_shards": 0,
+        "updated_at": datetime.now(UTC).isoformat(),
+    }
+    write_json_atomic(manifest_path, manifest)
+    started = time.monotonic()
+    generated = 0
+    stop_reason: str | None = None
+    for index, item in enumerate(manifest["items"], start=1):
+        if item["status"] == "ready":
+            if not keep_work:
+                shutil.rmtree(root / "work" / item["source_shard_sha256"], ignore_errors=True)
+            continue
+        if max_shards is not None and generated >= max_shards:
+            stop_reason = "max_shards"
+            break
+        if max_hours is not None and time.monotonic() - started >= max_hours * 3600:
+            stop_reason = "max_hours"
+            break
+        ready, total = _batch_progress(manifest)
+        print(
+            f"[detector-loop] item {index}/{total} | ready {ready}/{total} | "
+            f"source {item['source_id']} | frames {item['frames']} | "
+            f"{item['source_shard']}",
+            flush=True,
+        )
+        source_path = processed / item["source_shard"]
+        try:
+            sidecar_path = generate_detector_loop_sidecar(
+                source_path,
+                root,
+                catalog_path=catalog_path,
+                data_root=data_root,
+                width=width,
+                height=height,
+            )
+            sidecar = load_detector_loop_sidecar(sidecar_path)
+            candidate = DetectorLoopBatchCandidate(
+                relative_path=str(item["source_shard"]),
+                source_id=str(item["source_id"]),
+                frames=int(item["frames"]),
+                source_provenance_hash=str(item["source_provenance_hash"]),
+            )
+            if sidecar.source_shard_sha256 != item["source_shard_sha256"]:
+                raise ValueError("Generated detector-loop sidecar is bound to the wrong shard")
+            if not _compatible_generated_sidecar(
+                sidecar, candidate, width=width, height=height
+            ):
+                raise ValueError("Generated detector-loop sidecar is stale or incompatible")
+        except (ImportError, OSError, RuntimeError, ValueError) as error:
+            item["status"] = "failed"
+            manifest["status"] = "failed"
+            manifest["last_error"] = str(error)
+            manifest["updated_at"] = datetime.now(UTC).isoformat()
+            write_json_atomic(manifest_path, manifest)
+            raise
+        item["status"] = "ready"
+        generated += 1
+        manifest["session_generated_shards"] = generated
+        manifest["updated_at"] = datetime.now(UTC).isoformat()
+        if not keep_work:
+            shutil.rmtree(root / "work" / item["source_shard_sha256"], ignore_errors=True)
+        write_json_atomic(manifest_path, manifest)
+
+    ready, total = _refresh_batch_counts(manifest)
+    if ready == total:
+        manifest["status"] = "complete"
+    else:
+        manifest["status"] = stop_reason or "incomplete"
+    manifest["elapsed_seconds"] = round(time.monotonic() - started, 3)
+    manifest["updated_at"] = datetime.now(UTC).isoformat()
+    write_json_atomic(manifest_path, manifest)
+    return {
+        **detector_loop_batch_summary(manifest),
+        "manifest": str(manifest_path),
     }
 
 

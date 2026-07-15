@@ -9,6 +9,7 @@ from gravity_mocap.cli import (
     command_compare_previews,
     command_diagnose_motion,
     command_generate_detector_loop,
+    command_generate_detector_loop_batch,
     command_infer_detector_world,
     command_infer_rig,
     command_infer_video_baseline,
@@ -98,6 +99,7 @@ def test_video_to_rig_cli_has_backward_compatible_detector_alias() -> None:
     )
     diagnostics = parser.parse_args(["diagnose-motion", "motion.npz", "--rig-2d", "rig-2d.npz"])
     detector_loop = parser.parse_args(["generate-detector-loop", "walk.npz"])
+    detector_loop_batch = parser.parse_args(["generate-detector-loop-batch"])
 
     assert canonical.handler is command_video_to_rig
     assert legacy.handler is command_video_to_rig
@@ -108,6 +110,10 @@ def test_video_to_rig_cli_has_backward_compatible_detector_alias() -> None:
     assert diagnostics.handler is command_diagnose_motion
     assert detector_loop.handler is command_generate_detector_loop
     assert detector_loop.execute is False
+    assert detector_loop_batch.handler is command_generate_detector_loop_batch
+    assert detector_loop_batch.execute is False
+    assert detector_loop_batch.coverage == 0.1
+    assert detector_loop_batch.profile == "core"
     assert infer.root_motion == "safe"
     assert infer.avatar_renderer == "auto"
     assert baseline.avatar_renderer == "auto"

@@ -13,7 +13,13 @@ from .baseline import infer_detector_baseline
 from .catalog import DatasetCatalog
 from .comparison import compare_motion_previews
 from .data import MotionWindowDataset
-from .detector_loop import detector_loop_generation_plan, generate_detector_loop_sidecar
+from .detector_loop import (
+    detector_loop_batch_plan,
+    detector_loop_batch_summary,
+    detector_loop_generation_plan,
+    generate_detector_loop_batch,
+    generate_detector_loop_sidecar,
+)
 from .download import describe, download_dataset
 from .evaluation import diagnose_motion
 from .fixture import create_fixture
@@ -426,6 +432,50 @@ def command_generate_detector_loop(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_generate_detector_loop_batch(args: argparse.Namespace) -> int:
+    if args.max_hours is not None and args.max_hours <= 0:
+        raise ValueError("Detector-loop batch max_hours must be positive")
+    if args.max_shards is not None and args.max_shards <= 0:
+        raise ValueError("Detector-loop batch max_shards must be positive")
+    plan = detector_loop_batch_plan(
+        args.processed_root,
+        args.output_root,
+        catalog_path=args.catalog,
+        data_root=DEFAULT_DATA_ROOT,
+        profile=args.profile,
+        coverage_fraction=args.coverage,
+        selection_seed=args.selection_seed,
+        width=args.width,
+        height=args.height,
+    )
+    summary = detector_loop_batch_summary(plan)
+    summary["limits"] = {
+        "max_hours": args.max_hours,
+        "max_shards": args.max_shards,
+        "enforcement": "between atomic source-shard sidecars",
+    }
+    if not args.execute:
+        print(json.dumps(summary, indent=2))
+        print("DRY RUN: no batch manifest, render, detector cache, or sidecar was created.")
+        return 0
+    result = generate_detector_loop_batch(
+        args.processed_root,
+        args.output_root,
+        catalog_path=args.catalog,
+        data_root=DEFAULT_DATA_ROOT,
+        profile=args.profile,
+        coverage_fraction=args.coverage,
+        selection_seed=args.selection_seed,
+        width=args.width,
+        height=args.height,
+        max_hours=args.max_hours,
+        max_shards=args.max_shards,
+        keep_work=args.keep_work,
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
 def _add_video_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("video", type=Path)
     parser.add_argument("--output", type=Path)
@@ -666,6 +716,36 @@ def build_parser() -> argparse.ArgumentParser:
     detector_loop.add_argument("--height", type=int, default=512)
     detector_loop.add_argument("--execute", action="store_true")
     detector_loop.set_defaults(handler=command_generate_detector_loop)
+
+    detector_loop_batch = subparsers.add_parser(
+        "generate-detector-loop-batch",
+        help="Plan or resume a source-stratified batch of detector-loop sidecars",
+    )
+    detector_loop_batch.add_argument(
+        "--processed-root",
+        type=Path,
+        default=DEFAULT_PROCESSED,
+    )
+    detector_loop_batch.add_argument(
+        "--output-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT / "detector-loop",
+    )
+    detector_loop_batch.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    detector_loop_batch.add_argument("--profile", choices=("core",), default="core")
+    detector_loop_batch.add_argument("--coverage", type=float, default=0.1)
+    detector_loop_batch.add_argument("--selection-seed", type=int, default=8088)
+    detector_loop_batch.add_argument("--width", type=int, default=512)
+    detector_loop_batch.add_argument("--height", type=int, default=512)
+    detector_loop_batch.add_argument("--max-hours", type=float)
+    detector_loop_batch.add_argument("--max-shards", type=int)
+    detector_loop_batch.add_argument(
+        "--keep-work",
+        action="store_true",
+        help="Keep rendered PNG/video/detector intermediates after a verified sidecar",
+    )
+    detector_loop_batch.add_argument("--execute", action="store_true")
+    detector_loop_batch.set_defaults(handler=command_generate_detector_loop_batch)
     return parser
 
 
