@@ -11,6 +11,17 @@ This repository contains training infrastructure, not trained weights. The
 default CLI behavior is deliberately safe: download and training commands only
 print a plan until `--execute` is supplied.
 
+## Video to detector-safe 3D demo
+
+![Source video, MediaPipe baseline, and residual v7 comparison](docs/assets/residual-v7-demo.gif)
+
+The left panel shows the source with the detected 2D rig, the middle panel is
+the neutral fixed-bone detector baseline, and the right panel is the v7
+detector-safe residual output. [Open the full H.264 MP4](docs/assets/residual-v7-demo.mp4).
+The demo was rendered from a local qualification checkpoint; trained weights
+are not included in this repository. Media provenance is recorded in
+[`docs/assets/README.md`](docs/assets/README.md).
+
 ## Quickstart: from clone to resumable training
 
 Run these commands in order. Commands without `--execute` are safe previews and
