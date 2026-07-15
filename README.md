@@ -235,6 +235,10 @@ Heavy bundle in VIDEO tracking mode, tracks one person, and maps its 33
 landmarks (including heels and toes) to the neutral 22-joint contract. The
 frontend, model checksum, provenance, cache, artifact schema, CLI, and tests all
 live in this repository. It has no dependency on `cozy-rpg`, SMPL, or SMPL-X.
+MediaPipe now sees every native source frame exactly once in VIDEO mode. Only
+after tracking are coordinates and confidence resampled to canonical 30 FPS;
+24/25 FPS input is interpolated instead of sending repeated frames through the
+tracker.
 
 Install the optional video dependencies once:
 
@@ -329,7 +333,8 @@ Add `--source-video path/to/reference.mp4` to render `preview-motion.mp4`; the
 video hash must match the rig provenance. The 3D stage adds:
 
 - `motion.npz` contains rotations, FK joints, root translation, contacts, FPS,
-  topology, and provenance;
+  topology, and provenance. It also preserves the raw learned root trajectory
+  separately when the safe root policy suppresses it;
 - `preview-motion.mp4` places the 2D input beside a rigged, uniformly gray
   Quaternius character in the predicted camera frame. Its major bones are
   retargeted directly from the same neutral 22-joint rig; it does not introduce
@@ -346,6 +351,12 @@ script are committed under `src/gravity_mocap/assets/` and
 `scripts/build_quaternius_avatar.py`. Blender is an external preview tool; it is
 not imported by training and its output never becomes a training shard.
 
+Learned inference defaults to `--root-motion safe`: if fewer than 15% of frames
+have reliable predicted heel/toe support overall, or either foot has less than
+5% support, world translation fails closed to a stationary root.
+`--root-motion learned` exposes the raw trajectory for
+research, while `--root-motion stationary` forces a local-pose result.
+
 For convenience, the composed command still runs both stages:
 
 ```sh
@@ -361,6 +372,20 @@ source, MediaPipe baseline, and learned avatar in three aligned panels:
   path/to/preview-detector-baseline.mp4 \
   path/to/preview-motion.mp4 \
   path/to/comparison.mp4
+```
+
+For an honest real-video report (no unavailable ground-truth claim), measure
+detector coverage, learned correction, velocity/acceleration/jerk, contact
+activation, and root travel. `--world-preview` renders a fixed camera instead
+of centering the avatar every frame, so drift is visible:
+
+```sh
+./scripts/video.sh diagnose-motion path/to/motion.npz \
+  --rig-2d path/to/rig-2d.npz \
+  --baseline-motion path/to/detector-baseline-motion.npz \
+  --detector-world-3d path/to/detector-world-3d.npz \
+  --source-video path/to/reference.mp4 \
+  --world-preview
 ```
 
 The operation is idempotent: unchanged source bytes, model, checkpoint, avatar
@@ -404,6 +429,58 @@ epoch, sequence, and window, a mid-epoch checkpoint resumes with identical
 inputs even when DataLoader workers change. Visual features remain optional and
 are completely gated when `image_mask` is zero.
 
+Detector-in-the-loop sidecars provide the next domain bridge without turning
+generated media into training shards. The generator accepts only an approved
+source shard, renders it with the bundled CC0 gray avatar, runs the same pinned
+MediaPipe VIDEO frontend, aligns only the detector's rigid frame orientation,
+and binds the result to the source shard and provenance hashes. Plan one shard
+without creating anything, then explicitly generate it:
+
+```sh
+./scripts/video.sh generate-detector-loop \
+  Saved/GravityMocap/processed/<approved-shard>.npz
+
+./scripts/video.sh generate-detector-loop \
+  Saved/GravityMocap/processed/<approved-shard>.npz --execute
+```
+
+Sidecars stay below `Saved/GravityMocap/detector-loop/`, carry the detector
+model and avatar provenance, and can replace only the synthetic world-3D prior.
+The clean motion target and its dataset BOM remain authoritative. When enabled,
+training audits sidecar checksums and coverage and includes them in checkpoint
+compatibility. The v8 config leaves this input disabled until the intended
+approved shards have been generated and audited; once enabled it also requires
+at least 10% source-shard coverage instead of silently training on a token
+single-sidecar sample.
+
+Use the batch command to reach that coverage without hand-picking easy or short
+clips. It ranks shards deterministically, rounds coverage up independently for
+each `core` source, and interleaves CMU, AddBiomechanics, and 100STYLE so a
+bounded partial session is not single-source. Planning is read-only:
+
+```sh
+./scripts/video.sh generate-detector-loop-batch
+```
+
+Generation is resumable and idempotent. The default keeps only verified
+sidecars plus `detector-loop/batch-manifest.json`; large PNG, MP4, and detector
+intermediates are removed after each atomic sidecar. A time limit is checked
+between source shards, so the current shard is always allowed to finish:
+
+```sh
+# One short selected shard from each core source.
+./scripts/video.sh generate-detector-loop-batch --max-shards 3 --execute
+
+# Continue the same stable 10% selection for at most one bounded session.
+./scripts/video.sh generate-detector-loop-batch --max-hours 8 --execute
+```
+
+Pass `--keep-work` only when debugging a renderer or detector failure. Repeating
+the command revalidates compatible sidecars and continues the same selection;
+changing the coverage, seed, render dimensions, core inventory, or generator
+version produces a different auditable plan. This command prepares detector
+inputs only and never starts model training.
+
 The clean projection is also deterministic and configurable in
 `configs/datasets.yaml` under `preprocessing.synthetic_camera`: initial camera
 yaw/pitch/roll, distance, and offsets are sampled per sequence, then receive a
@@ -444,6 +521,29 @@ Features exported by the encoder can be attached to an existing shard using
 and may also replace `keypoints_2d` and `bbox`.
 
 ## Start motion training yourself
+
+### V8 temporal/domain-gap canary (next; not trained in this change)
+
+V8 keeps the detector-safe residual architecture and current 6x384 capacity,
+but adds target-relative joint velocity and acceleration losses, root
+acceleration, contact-transition supervision, and contact-conditioned foot
+sliding. Optional visual features receive more weight when detector confidence
+is low, but remain exactly zero-gated when no audited feature cache is attached.
+The safe root policy prevents an ungrounded root head from spoiling an otherwise
+useful local animation.
+
+Inspect the isolated three-epoch plan first. Training still requires an
+explicit `--execute` from the user:
+
+```sh
+./scripts/train-v8-canary.sh
+./scripts/train-v8-canary.sh --execute
+```
+
+The canary writes to `runs/motion-small-v4-temporal-canary`; the longer v8 run
+uses `./scripts/train-v8.sh` and `runs/motion-small-v4-temporal`. Neither output
+resumes or overwrites the qualified v7 run. Promote v8 only if held-out MPJPE,
+contact F1, acceleration gain, and fixed-camera real-video diagnostics all pass.
 
 ### Detector-safe residual model (recommended)
 

@@ -47,6 +47,7 @@ POSE_MODEL_URL = (
 POSE_MODEL_FILENAME = "pose_landmarker_heavy.task"
 POSE_MODEL_SIZE = 30_664_242
 POSE_MODEL_SHA256 = "64437af838a65d18e5ba7a0d39b465540069bc8aae8308de3e318aad31fcbc7b"
+TEMPORAL_RESAMPLING_VERSION = 2
 
 
 def file_sha256(path: Path, *, chunk_size: int = 1024 * 1024) -> str:
@@ -106,11 +107,80 @@ def selected_frame_indices(
     if max_frames is not None and max_frames < 1:
         raise ValueError("max_frames must be positive")
 
-    output_count = max(1, int(math.ceil(source_frame_count * target_fps / source_fps)))
+    duration = (source_frame_count - 1) / float(source_fps)
+    output_count = max(1, int(math.floor(duration * target_fps)) + 1)
     if max_frames is not None:
         output_count = min(output_count, max_frames)
     timeline = np.arange(output_count, dtype=np.float64) / target_fps
     return np.clip(np.rint(timeline * source_fps), 0, source_frame_count - 1).astype(np.int64)
+
+
+def resample_detector_values(
+    values: np.ndarray,
+    confidence: np.ndarray,
+    *,
+    source_fps: float,
+    target_fps: float,
+    output_frames: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Confidence-weighted temporal interpolation of native detector outputs."""
+    source = np.asarray(values, dtype=np.float32)
+    weights = np.asarray(confidence, dtype=np.float32)
+    if source.ndim < 2 or source.shape[:-1] != weights.shape:
+        raise ValueError(
+            f"Detector values/confidence shapes do not match: {source.shape}, {weights.shape}"
+        )
+    if len(source) < 1 or output_frames < 1:
+        raise ValueError("Detector resampling requires input and output frames")
+    if not np.isfinite(source).all() or not np.isfinite(weights).all():
+        raise ValueError("Detector resampling inputs must be finite")
+    if np.any((weights < 0) | (weights > 1)):
+        raise ValueError("Detector confidence must stay within [0, 1]")
+    if not np.isfinite(source_fps) or source_fps <= 0:
+        raise ValueError("source_fps must be positive")
+    if not np.isfinite(target_fps) or target_fps <= 0:
+        raise ValueError("target_fps must be positive")
+
+    positions = np.arange(output_frames, dtype=np.float64) * float(source_fps) / float(target_fps)
+    positions = np.clip(positions, 0.0, len(source) - 1)
+    left = np.floor(positions).astype(np.int64)
+    right = np.ceil(positions).astype(np.int64)
+    amount = (positions - left).astype(np.float32)
+    amount_shape = (output_frames,) + (1,) * (weights.ndim - 1)
+    amount = amount.reshape(amount_shape)
+
+    left_weight = weights[left] * (1.0 - amount)
+    right_weight = weights[right] * amount
+    output_confidence = left_weight + right_weight
+    numerator = source[left] * left_weight[..., None] + source[right] * right_weight[..., None]
+    output = np.divide(
+        numerator,
+        output_confidence[..., None],
+        out=np.zeros_like(numerator),
+        where=output_confidence[..., None] > 1e-8,
+    )
+    return output.astype(np.float32), output_confidence.astype(np.float32)
+
+
+def resample_detector_boxes(
+    boxes: np.ndarray,
+    *,
+    source_fps: float,
+    target_fps: float,
+    output_frames: int,
+) -> np.ndarray:
+    """Linearly interpolate already gap-validated detector boxes."""
+    source = np.asarray(boxes, dtype=np.float32)
+    if source.ndim != 2 or source.shape[1] != 4 or len(source) < 1:
+        raise ValueError(f"Expected detector boxes shaped (T, 4), got {source.shape}")
+    if not np.isfinite(source).all():
+        raise ValueError("Detector boxes must be finite before resampling")
+    positions = np.arange(output_frames, dtype=np.float64) * float(source_fps) / float(target_fps)
+    positions = np.clip(positions, 0.0, len(source) - 1)
+    left = np.floor(positions).astype(np.int64)
+    right = np.ceil(positions).astype(np.int64)
+    amount = (positions - left).astype(np.float32)[:, None]
+    return (source[left] * (1.0 - amount) + source[right] * amount).astype(np.float32)
 
 
 def _video_dependencies() -> tuple[Any, Any, Any]:
@@ -248,6 +318,7 @@ def video_to_rig(
     request = {
         "rig_2d_version": RIG_2D_VERSION,
         "detector_world_3d_version": DETECTOR_WORLD_3D_VERSION,
+        "temporal_resampling_version": TEMPORAL_RESAMPLING_VERSION,
         "source_sha256": source_digest,
         "backend": POSE_BACKEND,
         "model_sha256": POSE_MODEL_SHA256,
@@ -282,6 +353,7 @@ def video_to_rig(
                     "detector_world_3d": str(world_3d_path),
                     "manifest": str(manifest_path),
                     "preview": str(preview_path) if preview_path.is_file() else None,
+                    "request_hash": manifest.get("request_hash"),
                 }
         except (json.JSONDecodeError, KeyError, OSError, ValueError):
             pass
@@ -297,22 +369,29 @@ def video_to_rig(
         min_tracking_confidence=0.5,
         output_segmentation_masks=False,
     )
-    keypoints = np.zeros((len(indices), SKELETON.joint_count, 3), dtype=np.float32)
-    world_joints = np.zeros((len(indices), SKELETON.joint_count, 3), dtype=np.float32)
-    world_confidence = np.zeros((len(indices), SKELETON.joint_count), dtype=np.float32)
-    world_frame_mask = np.zeros(len(indices), dtype=np.float32)
-    raw_bboxes = np.full((len(indices), 4), np.nan, dtype=np.float32)
-    detected_frames = 0
+    last_target_time = (len(indices) - 1) / float(target_fps)
+    last_native_index = min(
+        source_frame_count - 1,
+        int(math.ceil(last_target_time * source_fps)),
+    )
+    native_indices = np.arange(last_native_index + 1, dtype=np.int64)
+    native_keypoints = np.zeros((len(native_indices), SKELETON.joint_count, 3), dtype=np.float32)
+    native_world_joints = np.zeros((len(native_indices), SKELETON.joint_count, 3), dtype=np.float32)
+    native_world_confidence = np.zeros(
+        (len(native_indices), SKELETON.joint_count), dtype=np.float32
+    )
+    native_raw_bboxes = np.full((len(native_indices), 4), np.nan, dtype=np.float32)
+    native_detected_frames = 0
     with vision.PoseLandmarker.create_from_options(options) as landmarker:
-        for output_index, _, bgr in _sampled_frames(video, indices):
+        for native_index, source_index, bgr in _sampled_frames(video, native_indices):
             rgb = bgr[:, :, ::-1].copy()
             result = landmarker.detect_for_video(
                 mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb),
-                round(1000.0 * output_index / target_fps),
+                round(1000.0 * source_index / source_fps),
             )
             if not result.pose_landmarks:
                 continue
-            detected_frames += 1
+            native_detected_frames += 1
             landmarks = np.asarray(
                 [
                     [
@@ -324,7 +403,7 @@ def video_to_rig(
                 ],
                 dtype=np.float32,
             )
-            keypoints[output_index] = mediapipe_to_canonical(
+            native_keypoints[native_index] = mediapipe_to_canonical(
                 landmarks, confidence_threshold=confidence_threshold
             )
             if result.pose_world_landmarks:
@@ -341,10 +420,9 @@ def video_to_rig(
                     dtype=np.float32,
                 )
                 (
-                    world_joints[output_index],
-                    world_confidence[output_index],
+                    native_world_joints[native_index],
+                    native_world_confidence[native_index],
                 ) = mediapipe_world_to_canonical(world_landmarks)
-                world_frame_mask[output_index] = 1.0
             bbox = padded_bbox_from_landmarks(
                 landmarks,
                 frame_width=width,
@@ -353,15 +431,41 @@ def video_to_rig(
                 padding=bbox_padding,
             )
             if bbox is not None:
-                raw_bboxes[output_index] = bbox
+                native_raw_bboxes[native_index] = bbox
 
-    bboxes = fill_short_bbox_gaps(raw_bboxes, max_gap=max_missing_frames)
+    native_gap_limit = int(math.ceil(max_missing_frames * source_fps / target_fps))
+    native_bboxes = fill_short_bbox_gaps(native_raw_bboxes, max_gap=native_gap_limit)
+    keypoint_xy, keypoint_confidence = resample_detector_values(
+        native_keypoints[..., :2],
+        native_keypoints[..., 2],
+        source_fps=source_fps,
+        target_fps=target_fps,
+        output_frames=len(indices),
+    )
+    keypoints = np.concatenate((keypoint_xy, keypoint_confidence[..., None]), axis=-1)
+    world_joints, world_confidence = resample_detector_values(
+        native_world_joints,
+        native_world_confidence,
+        source_fps=source_fps,
+        target_fps=target_fps,
+        output_frames=len(indices),
+    )
+    world_frame_mask = np.any(world_confidence > 0, axis=-1).astype(np.float32)
+    world_joints[world_frame_mask <= 0] = 0.0
+    world_confidence[world_frame_mask <= 0] = 0.0
+    bboxes = resample_detector_boxes(
+        native_bboxes,
+        source_fps=source_fps,
+        target_fps=target_fps,
+        output_frames=len(indices),
+    )
     normalized_keypoints = np.empty_like(keypoints)
     normalized_bboxes = np.empty_like(bboxes)
     for index, (points, bbox) in enumerate(zip(keypoints, bboxes, strict=True)):
         normalized_keypoints[index], normalized_bboxes[index] = normalize_detector_inputs(
             points, bbox, frame_width=width, frame_height=height
         )
+    detected_frames = int(np.any(keypoint_confidence > 0, axis=-1).sum())
     provenance = {
         **request,
         "artifact_type": "gravity-mocap-rig-2d",
@@ -371,6 +475,9 @@ def video_to_rig(
         "source_frame_count": source_frame_count,
         "output_frames": len(indices),
         "detected_frames": detected_frames,
+        "native_detector_frames": len(native_indices),
+        "native_detected_frames": native_detected_frames,
+        "temporal_resampling": "confidence-weighted-linear-after-native-video-tracking",
         "frame_width": width,
         "frame_height": height,
         "joint_names": list(SKELETON.names),
@@ -405,6 +512,9 @@ def video_to_rig(
         "source_frame_count": source_frame_count,
         "output_frames": len(indices),
         "detected_frames": int(world_frame_mask.sum()),
+        "native_detector_frames": len(native_indices),
+        "native_detected_frames": int(np.any(native_world_confidence > 0, axis=-1).sum()),
+        "temporal_resampling": "confidence-weighted-linear-after-native-video-tracking",
         "coordinate_transform": ["x", "-y", "-z"],
         "coordinate_units": "metres",
         "joint_names": list(SKELETON.names),
@@ -434,6 +544,7 @@ def video_to_rig(
         "detector_inputs": str(rig_path),
         "detector_world_3d": str(world_3d_path),
         "preview": str(preview_path) if preview else None,
+        "request_hash": request_hash,
     }
     write_json_atomic(manifest_path, manifest)
     return {
@@ -446,6 +557,7 @@ def video_to_rig(
         "detector_world_3d": str(world_3d_path),
         "manifest": str(manifest_path),
         "preview": str(preview_path) if preview else None,
+        "request_hash": request_hash,
     }
 
 

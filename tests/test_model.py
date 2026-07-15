@@ -7,7 +7,7 @@ from gravity_mocap.data import MotionWindowDataset
 from gravity_mocap.fixture import create_fixture
 from gravity_mocap.losses import compute_losses
 from gravity_mocap.metrics import compute_motion_metrics
-from gravity_mocap.model import GravityViewMotionModel
+from gravity_mocap.model import GravityViewMotionModel, visual_feature_gate
 from gravity_mocap.rotations import retarget_joints_to_neutral_skeleton
 from gravity_mocap.skeleton import SKELETON
 from gravity_mocap.trainer import build_model, evaluate_model, load_config
@@ -143,6 +143,13 @@ def test_motion_targets_are_fk_consistent_and_reprojection_stays_active(
     assert losses["joints_3d"] < 1e-12
     assert losses["reprojection_2d"] < 1e-10
 
+    jittered = {name: value.clone() for name, value in prediction.items()}
+    jittered["joints_3d"] = batch["joints_3d"].clone()
+    jittered["joints_3d"][:, 1::2, :, 0] += 0.05
+    jittered_losses = compute_losses(jittered, batch, weights)
+    assert jittered_losses["joint_velocity"] > losses["joint_velocity"]
+    assert jittered_losses["joint_acceleration"] > losses["joint_acceleration"]
+
     shifted = {name: value.clone() for name, value in prediction.items()}
     shifted["weak_camera"][..., 1] += 0.1
     shifted_losses = compute_losses(shifted, batch, weights)
@@ -172,6 +179,19 @@ def test_zero_image_mask_completely_gates_visual_features(tmp_path: Path) -> Non
 
     for name in baseline:
         assert torch.equal(baseline[name], visual_noise[name])
+
+
+def test_visual_features_receive_more_weight_when_detector_confidence_is_low() -> None:
+    mask = torch.ones((1, 2))
+    confidence = torch.stack((torch.ones(22), torch.zeros(22))).unsqueeze(0)
+
+    gate = visual_feature_gate(mask, confidence, confidence_aware=True)
+
+    assert gate.tolist() == [[0.25, 1.0]]
+    assert torch.equal(
+        visual_feature_gate(torch.zeros_like(mask), confidence, confidence_aware=True),
+        torch.zeros_like(mask),
+    )
 
 
 def test_held_out_evaluation_is_forward_only_and_reports_motion_metrics(tmp_path: Path) -> None:

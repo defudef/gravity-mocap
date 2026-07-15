@@ -26,6 +26,7 @@ class MotionWindowDataset(Dataset[dict[str, torch.Tensor]]):
         augmentation_seed: int = 0,
         gravity_view_contract: bool = False,
         detector_world_3d: dict[str, Any] | None = None,
+        detector_loop: dict[str, Any] | None = None,
     ):
         self.root = root
         self.sequence_length = sequence_length
@@ -33,6 +34,7 @@ class MotionWindowDataset(Dataset[dict[str, torch.Tensor]]):
         self.augmentation_seed = int(augmentation_seed)
         self.gravity_view_contract = bool(gravity_view_contract)
         self.detector_world_3d = dict(detector_world_3d or {})
+        self.detector_loop = dict(detector_loop or {})
         self.epoch = 0
         self.index: list[tuple[Path, int, int]] = []
         selected_paths = sorted(paths) if paths is not None else sorted(root.rglob("*.npz"))
@@ -49,6 +51,35 @@ class MotionWindowDataset(Dataset[dict[str, torch.Tensor]]):
             if not starts or starts[-1] != final:
                 starts.append(final)
             self.index.extend((path, start, frame_count) for start in starts)
+        self.detector_loop_by_path = self._index_detector_loop()
+
+    def _index_detector_loop(self) -> dict[Path, Any]:
+        if not self.detector_loop.get("enabled", False):
+            return {}
+        if not self.detector_world_3d.get("enabled", False):
+            raise ValueError("detector_loop requires detector_world_3d inputs")
+        from .detector_loop import index_detector_loop_sidecars
+        from .video import file_sha256
+
+        index = index_detector_loop_sidecars(Path(self.detector_loop["root"]))
+        result = {}
+        missing: list[Path] = []
+        for path in self.sequence_paths:
+            source_hash = file_sha256(path)
+            item = index.get(source_hash)
+            if item is None:
+                missing.append(path)
+                continue
+            _, sidecar = item
+            arrays, provenance = read_shard(path)
+            if sidecar.source_provenance_hash != provenance.get("provenance_hash"):
+                raise ValueError(f"{path}: detector-loop provenance hash does not match")
+            if sidecar.frames != len(arrays["frame_mask"]):
+                raise ValueError(f"{path}: detector-loop frame count does not match")
+            result[path] = sidecar
+        if missing and self.detector_loop.get("require_all", False):
+            raise ValueError(f"Detector-loop sidecar is missing for {missing[0]}")
+        return result
 
     @property
     def sequence_count(self) -> int:
@@ -76,7 +107,7 @@ class MotionWindowDataset(Dataset[dict[str, torch.Tensor]]):
         result["bbox_target"] = result["bbox"].copy()
         relative = path.relative_to(self.root)
         if self.gravity_view_contract:
-            _convert_targets_to_gravity_view(result)
+            convert_targets_to_gravity_view(result)
         generator: np.random.Generator | None = None
         if self.augmentation.get("enabled", False):
             digest = hashlib.sha256(
@@ -84,7 +115,8 @@ class MotionWindowDataset(Dataset[dict[str, torch.Tensor]]):
             ).digest()
             generator = np.random.default_rng(int.from_bytes(digest[:8], "big"))
             _augment_detector_inputs(result, self.augmentation, generator)
-        if self.detector_world_3d.get("enabled", False):
+        real_detector = self._detector_loop_window(path, start, end, result)
+        if self.detector_world_3d.get("enabled", False) and not real_detector:
             if not self.gravity_view_contract:
                 raise ValueError("detector_world_3d requires gravity_view_contract")
             if generator is None:
@@ -100,6 +132,46 @@ class MotionWindowDataset(Dataset[dict[str, torch.Tensor]]):
             )
         return {name: torch.from_numpy(value) for name, value in result.items()}
 
+    def _detector_loop_window(
+        self,
+        path: Path,
+        start: int,
+        end: int,
+        result: dict[str, np.ndarray],
+    ) -> bool:
+        sidecar = self.detector_loop_by_path.get(path)
+        if sidecar is None:
+            return False
+        probability = float(self.detector_loop.get("mix_probability", 1.0))
+        digest = hashlib.sha256(
+            f"{self.augmentation_seed}:{self.epoch}:detector-loop:{path}:{start}".encode()
+        ).digest()
+        choice = int.from_bytes(digest[:8], "big") / float(2**64 - 1)
+        if choice >= probability:
+            return False
+        for source_name, target_name in (
+            ("detector_joints_3d", "detector_joints_3d"),
+            ("detector_3d_confidence", "detector_3d_confidence"),
+        ):
+            source = np.asarray(getattr(sidecar, source_name))[start:end]
+            if len(source) < self.sequence_length:
+                padding = np.zeros(
+                    (self.sequence_length - len(source), *source.shape[1:]),
+                    dtype=source.dtype,
+                )
+                source = np.concatenate((source, padding), axis=0)
+            result[target_name] = np.asarray(source, dtype=np.float32).copy()
+        sidecar_mask = np.asarray(sidecar.frame_mask[start:end], dtype=np.float32)
+        if len(sidecar_mask) < self.sequence_length:
+            sidecar_mask = np.pad(
+                sidecar_mask,
+                (0, self.sequence_length - len(sidecar_mask)),
+                mode="constant",
+            )
+        result["detector_3d_confidence"] *= sidecar_mask[:, None] * result["frame_mask"][:, None]
+        result["detector_joints_3d"][result["frame_mask"] <= 0] = 0.0
+        return True
+
 
 def _rotation_6d_to_matrix(value: np.ndarray) -> np.ndarray:
     first = value[..., :3]
@@ -111,7 +183,7 @@ def _rotation_6d_to_matrix(value: np.ndarray) -> np.ndarray:
     return np.stack((first, second, third), axis=-1).astype(np.float32)
 
 
-def _convert_targets_to_gravity_view(sample: dict[str, np.ndarray]) -> None:
+def convert_targets_to_gravity_view(sample: dict[str, np.ndarray]) -> None:
     """Remove unobservable absolute world yaw from the learned target contract."""
     local_rotations = sample["local_rotations_6d"].copy()
     root_world = _rotation_6d_to_matrix(local_rotations[:, 0])

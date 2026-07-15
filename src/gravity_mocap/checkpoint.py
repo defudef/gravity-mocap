@@ -71,6 +71,11 @@ def compatibility_payload(config: dict[str, Any]) -> dict[str, Any]:
             "split_seed": data.get("split_seed", 0),
             "gravity_view_contract": data.get("gravity_view_contract", False),
             "detector_world_3d": data.get("detector_world_3d", {"enabled": False}),
+            "detector_loop": {
+                key: value
+                for key, value in data.get("detector_loop", {"enabled": False}).items()
+                if key != "root"
+            },
             "augmentation": data.get("augmentation", {}),
         },
         "model": config["model"],

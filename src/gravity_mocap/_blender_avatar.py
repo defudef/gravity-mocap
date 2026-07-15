@@ -84,17 +84,18 @@ def _reset_scene() -> None:
             collection.remove(item)
 
 
-def _load_motion(path: Path) -> np.ndarray:
+def _load_motion(path: Path) -> tuple[np.ndarray, bool]:
     with np.load(path, allow_pickle=False) as archive:
         joints = np.asarray(archive["joints_blender"], dtype=np.float32)
         names = tuple(str(name) for name in archive["joint_names"].tolist())
+        world_space = bool(np.asarray(archive.get("world_space", False)).item())
     if joints.ndim != 3 or joints.shape[1:] != (len(JOINT_NAMES), 3):
         raise RuntimeError(f"Expected joints_blender shaped (T, 22, 3), got {joints.shape}")
     if names != JOINT_NAMES:
         raise RuntimeError("Motion joint_names do not match the canonical 22-joint order")
     if len(joints) == 0 or not np.isfinite(joints).all():
         raise RuntimeError("Motion must contain finite joints and at least one frame")
-    return joints
+    return joints, world_space
 
 
 def _frame(right: Vector, up: Vector) -> Matrix:
@@ -137,10 +138,14 @@ def _motion_scale(joints: np.ndarray, armature: bpy.types.Object) -> float:
     return float(asset_chain / median_chain)
 
 
-def _targets(joints: np.ndarray, armature: bpy.types.Object) -> np.ndarray:
+def _targets(joints: np.ndarray, armature: bpy.types.Object, *, world_space: bool) -> np.ndarray:
     scale = _motion_scale(joints, armature)
     anchor = np.asarray(armature.data.bones["pelvis"].head_local, dtype=np.float32)
-    roots = joints[:, INDEX["root"] : INDEX["root"] + 1]
+    roots = (
+        joints[:1, INDEX["root"] : INDEX["root"] + 1]
+        if world_space
+        else joints[:, INDEX["root"] : INDEX["root"] + 1]
+    )
     targets = anchor[None, None] + (joints - roots) * scale
     floor_joints = [
         INDEX["left_ankle"],
@@ -148,7 +153,11 @@ def _targets(joints: np.ndarray, armature: bpy.types.Object) -> np.ndarray:
         INDEX["left_toe"],
         INDEX["right_toe"],
     ]
-    floor = np.min(targets[:, floor_joints, 2], axis=1)
+    floor = (
+        np.repeat(np.min(targets[:1, floor_joints, 2]), len(targets))
+        if world_space
+        else np.min(targets[:, floor_joints, 2], axis=1)
+    )
     targets[..., 2] -= floor[:, None]
     return targets
 
@@ -230,7 +239,7 @@ def _material(name: str, color: tuple[float, float, float, float], roughness: fl
     return material
 
 
-def _stage(targets: np.ndarray, width: int, height: int) -> None:
+def _stage(targets: np.ndarray, width: int, height: int, *, world_space: bool) -> None:
     scene = bpy.context.scene
     scene.render.engine = "BLENDER_EEVEE"
     scene.eevee.taa_render_samples = 16
@@ -253,20 +262,55 @@ def _stage(targets: np.ndarray, width: int, height: int) -> None:
     floor.name = "GravityMocap_Floor"
     floor.data.materials.append(_material("GravityMocap_Floor", (0.055, 0.06, 0.075, 1.0), 0.92))
 
+    if world_space:
+        curve_data = bpy.data.curves.new("GravityMocap_RootTrail", type="CURVE")
+        curve_data.dimensions = "3D"
+        curve_data.bevel_depth = 0.012
+        curve_data.bevel_resolution = 2
+        spline = curve_data.splines.new("POLY")
+        spline.points.add(len(targets) - 1)
+        for point, coordinate in zip(
+            spline.points,
+            targets[:, INDEX["root"]],
+            strict=True,
+        ):
+            point.co = (float(coordinate[0]), float(coordinate[1]), 0.018, 1.0)
+        trail = bpy.data.objects.new("GravityMocap_RootTrail", curve_data)
+        bpy.context.collection.objects.link(trail)
+        curve_data.materials.append(
+            _material("GravityMocap_RootTrail", (0.95, 0.27, 0.08, 1.0), 0.7)
+        )
+
     x_min = float(np.min(targets[..., 0]))
     x_max = float(np.max(targets[..., 0]))
+    y_min = float(np.min(targets[..., 1]))
+    y_max = float(np.max(targets[..., 1]))
     z_min = min(0.0, float(np.min(targets[..., 2])))
     z_max = float(np.max(targets[..., 2]))
-    center = Vector(((x_min + x_max) * 0.5, 0.0, (z_min + z_max) * 0.5))
+    center = Vector(
+        (
+            (x_min + x_max) * 0.5,
+            (y_min + y_max) * 0.5 if world_space else 0.0,
+            (z_min + z_max) * 0.5,
+        )
+    )
     vertical = max(z_max - z_min, 1.8)
     horizontal = max(x_max - x_min, 1.8)
     aspect = width / height
 
-    bpy.ops.object.camera_add(location=(center.x, -5.5, center.z + 0.05))
+    camera_distance = max(5.5, vertical * 2.2, horizontal * 1.5 / aspect)
+    bpy.ops.object.camera_add(
+        location=(
+            center.x,
+            y_min - camera_distance if world_space else -5.5,
+            center.z + (0.12 * vertical if world_space else 0.05),
+        )
+    )
     camera = bpy.context.object
-    camera.data.type = "ORTHO"
+    camera.data.type = "PERSP" if world_space else "ORTHO"
     camera.data.lens = 50.0
-    camera.data.ortho_scale = max(vertical * 1.14, horizontal * 1.14 / aspect)
+    if not world_space:
+        camera.data.ortho_scale = max(vertical * 1.14, horizontal * 1.14 / aspect)
     _look_at(camera, center)
     scene.camera = camera
 
@@ -309,7 +353,7 @@ def main() -> None:
     args = _arguments()
     if args.width < 64 or args.height < 64 or args.fps <= 0:
         raise RuntimeError("Avatar render dimensions and FPS must be positive")
-    motion = _load_motion(args.motion.expanduser().resolve())
+    motion, world_space = _load_motion(args.motion.expanduser().resolve())
     _reset_scene()
     bpy.ops.import_scene.gltf(filepath=str(args.asset.expanduser().resolve()))
     armatures = [item for item in bpy.context.scene.objects if item.type == "ARMATURE"]
@@ -321,9 +365,9 @@ def main() -> None:
             modifier.type == "ARMATURE" for modifier in item.modifiers
         ):
             bpy.data.objects.remove(item, do_unlink=True)
-    targets = _targets(motion, armature)
+    targets = _targets(motion, armature, world_space=world_space)
     _animate(armature, targets)
-    _stage(targets, args.width, args.height)
+    _stage(targets, args.width, args.height, world_space=world_space)
     _render(args, len(motion))
 
 

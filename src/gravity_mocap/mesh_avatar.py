@@ -94,6 +94,7 @@ def render_mesh_avatar_frames(
     width: int,
     height: int,
     fps: float,
+    world_space: bool = False,
 ) -> list[Path]:
     joints = np.asarray(joints_3d, dtype=np.float32)
     if joints.ndim != 3 or joints.shape[1:] != (SKELETON.joint_count, 3):
@@ -121,6 +122,7 @@ def render_mesh_avatar_frames(
             handle,
             joints_blender=canonical_to_blender_joints(joints),
             joint_names=np.asarray(SKELETON.names),
+            world_space=np.asarray(bool(world_space)),
         )
     command = [
         blender,
@@ -143,7 +145,8 @@ def render_mesh_avatar_frames(
         str(float(fps)),
     ]
     print(
-        f"[avatar] rendering {len(joints)} frame(s) with the bundled gray Quaternius mesh",
+        f"[avatar] rendering {len(joints)} frame(s) with the bundled gray Quaternius mesh "
+        f"in {'world' if world_space else 'local'} space",
         flush=True,
     )
     result = subprocess.run(

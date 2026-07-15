@@ -180,6 +180,28 @@ def test_epoch_limit_can_change_but_optimizer_settings_cannot() -> None:
         },
     }
     assert compatibility_hash(changed_augmentation) != compatibility_hash(config)
+    moved_detector_loop = {
+        **config,
+        "data": {
+            **config["data"],
+            "detector_loop": {
+                **config["data"]["detector_loop"],
+                "root": "/another/checkout/Saved/GravityMocap/detector-loop",
+            },
+        },
+    }
+    assert compatibility_hash(moved_detector_loop) == compatibility_hash(config)
+    changed_detector_loop_mix = {
+        **config,
+        "data": {
+            **config["data"],
+            "detector_loop": {
+                **config["data"]["detector_loop"],
+                "mix_probability": 0.25,
+            },
+        },
+    }
+    assert compatibility_hash(changed_detector_loop_mix) != compatibility_hash(config)
     changed_validation_schedule = {
         **config,
         "validation": {**config["validation"], "every_epochs": 10},
