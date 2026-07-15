@@ -458,6 +458,16 @@ to the audited motion range, and contact BCE uses per-class corpus balance.
 on exactly the same valid joint frames; a positive value is required before
 claiming that the learned correction makes animation smoother.
 
+The recorded v7 qualification run completed 46 held-out validations after the
+three-epoch canary and a time-bounded continuation. Its best-pose checkpoint
+reached 2.68 cm MPJPE versus 4.31 cm for the raw detector, with 17.38 cm local
+root drift, contact F1 0.433, and `accel_gain=+39.98 m/s^2`. This passes the
+held-out pose and smoothness gates. On the 12-second real detector reference,
+however, the aggregate checkpoint still travelled an implausible 4.16 m and no
+contact probability crossed 0.5. Treat root/world grounding and contacts as a
+remaining detector-domain gap; do not qualify or release the checkpoint from
+synthetic holdout metrics alone.
+
 ### Smaller 11.7M-parameter v2 baseline
 
 The full-pose v5 model remains a controlled comparison for the current

@@ -208,6 +208,18 @@ class frequencies measured from the approved training corpus. Validation also
 reports `accel_gain` against the neutral detector on the same valid joint
 frames, so lower positional error cannot hide a temporally noisier animation.
 
+The local v7 qualification run reached 2.68 cm held-out MPJPE at epoch 46,
+compared with 4.31 cm for the raw detector and 4.66 cm for the neutralized
+prior. Its root drift was 17.38 cm, contact F1 was 0.433, and acceleration error
+was 55.81 m/s^2 versus 95.79 m/s^2 for the neutral detector
+(`accel_gain=+39.98 m/s^2`). The `min_delta`-selected aggregate checkpoint is
+epoch 38; the separately retained best-pose checkpoint is epoch 46. A real
+12-second detector clip remained stable and reduced mean joint acceleration
+from 7.76 to 7.26 m/s^2, but its predicted root path was still 4.16 m and all
+contact probabilities stayed below 0.5. Further training on the same simulated
+detector distribution is therefore not sufficient evidence for world/root or
+contact quality; keep those as explicit real-input qualification failures.
+
 The capacity calculation is in `docs/model-capacity.md`. In short, current
 `core` yields roughly 53--54 thousand 4-second training windows after the 5%
 holdout. That supports the 6x384, 11.7M-parameter model; the 12x512, 39.6M model
