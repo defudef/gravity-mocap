@@ -37,6 +37,7 @@ from .data import (
     discover_shards,
     partition_sequence_paths,
 )
+from .detector_loop import audit_detector_loop_sidecars
 from .losses import compute_losses
 from .metrics import compute_motion_metrics
 from .model import GravityViewMotionModel
@@ -72,6 +73,17 @@ def load_config(path: Path) -> dict[str, Any]:
     detector_world_3d.setdefault("noise_std_meters", 0.0)
     detector_world_3d.setdefault("confidence_min", 1.0)
     detector_world_3d.setdefault("joint_dropout_probability", 0.0)
+    detector_loop = data_config.setdefault("detector_loop", {"enabled": False})
+    detector_loop.setdefault("enabled", False)
+    detector_loop.setdefault("mix_probability", 1.0)
+    detector_loop.setdefault("require_all", False)
+    detector_loop.setdefault("minimum_coverage_fraction", 0.0)
+    if detector_loop["enabled"]:
+        if "root" not in detector_loop:
+            raise ValueError("data.detector_loop.root is required when enabled")
+        detector_loop_root = Path(detector_loop["root"])
+        if not detector_loop_root.is_absolute():
+            detector_loop["root"] = str((path.parent / detector_loop_root).resolve())
     if float(data_config["target_fps"]) <= 0:
         raise ValueError("data.target_fps must be positive")
     validation_fraction = float(data_config["validation_fraction"])
@@ -83,12 +95,19 @@ def load_config(path: Path) -> dict[str, Any]:
         raise ValueError("data.detector_world_3d.confidence_min must be in [0, 1]")
     if not 0 <= float(detector_world_3d["joint_dropout_probability"]) <= 1:
         raise ValueError("data.detector_world_3d.joint_dropout_probability must be in [0, 1]")
+    if not 0 <= float(detector_loop["mix_probability"]) <= 1:
+        raise ValueError("data.detector_loop.mix_probability must be in [0, 1]")
+    if not 0 <= float(detector_loop["minimum_coverage_fraction"]) <= 1:
+        raise ValueError("data.detector_loop.minimum_coverage_fraction must be in [0, 1]")
+    if detector_loop["enabled"] and not detector_world_3d["enabled"]:
+        raise ValueError("data.detector_loop requires data.detector_world_3d.enabled")
     model_uses_world_3d = bool(config["model"].get("use_detector_world_3d", False))
     model_config = config["model"]
     model_config.setdefault("pose_representation", "rotations")
     model_config.setdefault("max_detector_residual_meters", 0.12)
     model_config.setdefault("residual_confidence_floor", 0.25)
     model_config.setdefault("max_root_speed_mps", 5.0)
+    model_config.setdefault("confidence_aware_visual_gating", False)
     if model_config["pose_representation"] not in {"rotations", "detector_residual"}:
         raise ValueError("model.pose_representation must be rotations or detector_residual")
     if float(model_config["max_detector_residual_meters"]) <= 0:
@@ -198,6 +217,22 @@ def _audit_data(config: dict[str, Any]) -> tuple[dict[str, Any], list[str], dict
             ".bvh": B3D_BVH_CONVERTER_VERSION,
         },
     )
+    detector_loop = config["data"]["detector_loop"]
+    if detector_loop["enabled"]:
+        source_paths = [root / shard["path"] for shard in bill_of_materials["shards"]]
+        loop_errors, loop_bom = audit_detector_loop_sidecars(
+            source_paths,
+            Path(detector_loop["root"]),
+            require_all=bool(detector_loop["require_all"]),
+        )
+        errors.extend(loop_errors)
+        minimum_coverage = float(detector_loop["minimum_coverage_fraction"])
+        if float(loop_bom["coverage_fraction"]) < minimum_coverage:
+            errors.append(
+                "Detector-loop coverage "
+                f"{loop_bom['coverage_fraction']:.3f} is below required {minimum_coverage:.3f}"
+            )
+        bill_of_materials["detector_loop"] = loop_bom
     return inventory, errors, bill_of_materials
 
 
@@ -564,6 +599,7 @@ def run_training(
         augmentation_seed=seed,
         gravity_view_contract=bool(config["data"]["gravity_view_contract"]),
         detector_world_3d=config["data"]["detector_world_3d"],
+        detector_loop=config["data"]["detector_loop"],
     )
     if not dataset:
         raise RuntimeError("No valid preprocessed shards found; training did not start")
@@ -575,6 +611,7 @@ def run_training(
         augmentation_seed=seed,
         gravity_view_contract=bool(config["data"]["gravity_view_contract"]),
         detector_world_3d=config["data"]["detector_world_3d"],
+        detector_loop=config["data"]["detector_loop"],
     )
     if bool(config["validation"]["enabled"]) and not validation_dataset:
         raise RuntimeError("Validation is enabled but the holdout split contains no windows")

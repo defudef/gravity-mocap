@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from gravity_mocap.checkpoint import CHECKPOINT_VERSION
-from gravity_mocap.inference import infer_motion, infer_rig, window_starts
+from gravity_mocap.inference import infer_motion, infer_rig, select_root_motion, window_starts
 from gravity_mocap.model import GravityViewMotionModel
 from gravity_mocap.rotations import identity_rotation_6d, integrate_root_velocity
 from gravity_mocap.skeleton import JOINT_NAMES, SKELETON
@@ -108,6 +108,37 @@ def test_velocity_integration_uses_seconds() -> None:
     orientation = torch.eye(3).repeat(4, 1, 1)
     translation = integrate_root_velocity(velocity, orientation, fps=30.0)
     assert torch.allclose(translation[:, 0], torch.tensor([0.0, 0.1, 0.2, 0.3]))
+
+
+def test_safe_root_motion_fails_closed_without_ground_contacts() -> None:
+    velocity = torch.tensor([[1.0, 0.0, 0.0]]).repeat(10, 1)
+    rotations = torch.eye(3).repeat(10, 1, 1)
+    contacts = torch.zeros((10, 6))
+
+    selected, translation, result = select_root_motion(
+        velocity,
+        rotations,
+        contacts,
+        fps=30.0,
+        policy="safe",
+    )
+
+    assert torch.equal(selected, torch.zeros_like(velocity))
+    assert torch.equal(translation, torch.zeros_like(velocity))
+    assert result["applied"] == "stationary"
+
+    contacts[:, 2] = 1.0
+    contacts[:, 3] = 1.0
+    selected, translation, result = select_root_motion(
+        velocity,
+        rotations,
+        contacts,
+        fps=30.0,
+        policy="safe",
+    )
+    assert torch.equal(selected, velocity)
+    assert translation[-1, 0] == pytest.approx(0.3)
+    assert result["applied"] == "learned"
 
 
 @pytest.mark.parametrize("frames", [5, 11])

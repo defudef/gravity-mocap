@@ -32,7 +32,65 @@ from .skeleton import SKELETON
 from .video import _sampled_frames, _video_dependencies, file_sha256
 from .world3d import load_detector_world_3d, prepare_detector_world_3d
 
-INFERENCE_VERSION = 4
+INFERENCE_VERSION = 6
+ROOT_MOTION_POLICIES = ("safe", "learned", "stationary")
+
+
+def select_root_motion(
+    raw_velocity: torch.Tensor,
+    root_rotations: torch.Tensor,
+    contacts: torch.Tensor,
+    *,
+    fps: float,
+    policy: str,
+    minimum_ground_contact_fraction: float = 0.15,
+    minimum_per_foot_contact_fraction: float = 0.05,
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    if policy not in ROOT_MOTION_POLICIES:
+        raise ValueError(
+            f"Unknown root-motion policy {policy!r}; "
+            f"expected one of {', '.join(ROOT_MOTION_POLICIES)}"
+        )
+    raw_translation = integrate_root_velocity(raw_velocity, root_rotations, fps=fps)
+    ground_support = contacts[..., 2:].amax(dim=-1)
+    supported_fraction = float((ground_support >= 0.5).float().mean().cpu())
+    left_support = contacts[..., (2, 4)].amax(dim=-1)
+    right_support = contacts[..., (3, 5)].amax(dim=-1)
+    left_fraction = float((left_support >= 0.5).float().mean().cpu())
+    right_fraction = float((right_support >= 0.5).float().mean().cpu())
+    applied = policy
+    reason = "explicit-policy"
+    if policy == "safe":
+        if (
+            supported_fraction < minimum_ground_contact_fraction
+            or left_fraction < minimum_per_foot_contact_fraction
+            or right_fraction < minimum_per_foot_contact_fraction
+        ):
+            applied = "stationary"
+            reason = "insufficient-ground-contact-support"
+        else:
+            applied = "learned"
+            reason = "ground-contact-support-passed"
+    if applied == "stationary":
+        velocity = torch.zeros_like(raw_velocity)
+        translation = torch.zeros_like(raw_translation)
+    else:
+        velocity = raw_velocity
+        translation = raw_translation
+    return (
+        velocity,
+        translation,
+        {
+            "requested": policy,
+            "applied": applied,
+            "reason": reason,
+            "ground_contact_fraction": supported_fraction,
+            "left_foot_contact_fraction": left_fraction,
+            "right_foot_contact_fraction": right_fraction,
+            "minimum_ground_contact_fraction": minimum_ground_contact_fraction,
+            "minimum_per_foot_contact_fraction": minimum_per_foot_contact_fraction,
+        },
+    )
 
 
 def resolve_device(name: str) -> torch.device:
@@ -146,9 +204,12 @@ def _render_motion_preview(
     nearer_positive: bool = True,
     avatar_title: str = "Gravity Mocap - learned 3D avatar",
     avatar_renderer: str = "auto",
+    world_space: bool = False,
 ) -> str:
     cv2, _, _ = _video_dependencies()
     renderer = resolve_avatar_renderer(avatar_renderer)
+    if world_space and renderer != "mesh":
+        raise RuntimeError("World-space preview requires the Blender mesh renderer")
     first_frame = next(_sampled_frames(video, indices[:1]))[2]
     source_height, source_width = first_frame.shape[:2]
     panel_width = source_height
@@ -161,6 +222,7 @@ def _render_motion_preview(
                 width=panel_width,
                 height=source_height,
                 fps=fps,
+                world_space=world_space,
             )
             if renderer == "mesh"
             else None
@@ -219,7 +281,9 @@ def _render_motion_preview(
                     )
                     cv2.putText(
                         panel,
-                        "Quaternius CC0 - neutral 22-joint retarget - no SMPL",
+                        "Quaternius CC0 - "
+                        f"{'fixed-camera world space' if world_space else 'neutral retarget'} "
+                        "- no SMPL",
                         (20, source_height - 18),
                         cv2.FONT_HERSHEY_SIMPLEX,
                         0.42,
@@ -245,6 +309,7 @@ def infer_rig(
     force: bool = False,
     preview: bool = False,
     avatar_renderer: str = "auto",
+    root_motion: str = "safe",
 ) -> dict[str, Any]:
     """Recover neutral 3D motion from a standalone 2D rig artifact."""
     rig_2d_path = rig_2d_path.expanduser().resolve()
@@ -261,6 +326,11 @@ def infer_rig(
         raise ValueError(
             f"Unknown avatar renderer {avatar_renderer!r}; "
             f"expected one of {', '.join(AVATAR_RENDERERS)}"
+        )
+    if root_motion not in ROOT_MOTION_POLICIES:
+        raise ValueError(
+            f"Unknown root-motion policy {root_motion!r}; "
+            f"expected one of {', '.join(ROOT_MOTION_POLICIES)}"
         )
     actual_avatar_renderer = (
         resolve_avatar_renderer(avatar_renderer) if preview else avatar_renderer
@@ -317,6 +387,7 @@ def infer_rig(
         "checkpoint_version": CHECKPOINT_VERSION,
         "sequence_length": sequence_length,
         "stride": stride,
+        "root_motion": root_motion,
     }
     request_hash = stable_hash(request)
     output_dir = output_dir.expanduser().resolve()
@@ -370,15 +441,24 @@ def infer_rig(
         )
         gravity_view_orientation_6d = prediction["gravity_view_orientation_6d"]
     local_rotations = rotation_6d_to_matrix(local_rotations_6d)
-    root_velocity = prediction["root_velocity_local"]
-    root_translation = integrate_root_velocity(root_velocity, local_rotations[:, 0], fps=fps)
+    raw_root_velocity = prediction["root_velocity_local"]
+    contacts = torch.sigmoid(prediction["contacts"])
+    root_velocity, root_translation, root_motion_result = select_root_motion(
+        raw_root_velocity,
+        local_rotations[:, 0],
+        contacts,
+        fps=fps,
+        policy=root_motion,
+    )
+    raw_root_translation = integrate_root_velocity(
+        raw_root_velocity, local_rotations[:, 0], fps=fps
+    )
     camera_joints = camera_space_joints(
         local_rotations_6d,
         prediction["camera_orientation_6d"],
         centered_joints,
     )
     world_joints = centered_joints + root_translation.unsqueeze(-2)
-    contacts = torch.sigmoid(prediction["contacts"])
 
     arrays = {
         "local_rotations_6d": local_rotations_6d.cpu().numpy(),
@@ -387,9 +467,12 @@ def infer_rig(
         "gravity_view_orientation_6d": gravity_view_orientation_6d.cpu().numpy(),
         "root_velocity_local": root_velocity.cpu().numpy(),
         "root_translation": root_translation.cpu().numpy(),
+        "root_velocity_local_raw": raw_root_velocity.cpu().numpy(),
+        "root_translation_raw": raw_root_translation.cpu().numpy(),
         "joints_3d": centered_joints.cpu().numpy(),
         "joints_camera": camera_joints.cpu().numpy(),
         "joints_world": world_joints.cpu().numpy(),
+        "joints_world_raw": (centered_joints + raw_root_translation.unsqueeze(-2)).cpu().numpy(),
         "contacts": contacts.cpu().numpy(),
         "weak_camera": prediction["weak_camera"].cpu().numpy(),
     }
@@ -412,6 +495,7 @@ def infer_rig(
         "fps": fps,
         "frames": len(inputs["frame_mask"]),
         "joint_names": list(SKELETON.names),
+        "root_motion_result": root_motion_result,
     }
     write_npz_atomic(
         motion_path,
@@ -465,6 +549,7 @@ def infer_motion(
     force: bool = False,
     preview: bool = True,
     avatar_renderer: str = "auto",
+    root_motion: str = "safe",
 ) -> dict[str, Any]:
     """Backward-compatible video-bound wrapper around :func:`infer_rig`."""
     return infer_rig(
@@ -476,4 +561,5 @@ def infer_motion(
         force=force,
         preview=preview,
         avatar_renderer=avatar_renderer,
+        root_motion=root_motion,
     )

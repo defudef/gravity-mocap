@@ -10,6 +10,20 @@ from .rotations import retarget_joints_to_neutral_skeleton
 from .skeleton import PARENTS
 
 
+def visual_feature_gate(
+    image_mask: Tensor,
+    detector_confidence: Tensor | None,
+    *,
+    confidence_aware: bool,
+) -> Tensor:
+    """Gate visual evidence harder when the geometric detector is already reliable."""
+    gate = image_mask.clamp(0.0, 1.0)
+    if confidence_aware and detector_confidence is not None:
+        geometric_confidence = detector_confidence.mean(dim=-1).clamp(0.0, 1.0)
+        gate = gate * (0.25 + 0.75 * (1.0 - geometric_confidence))
+    return gate
+
+
 class ModalityMLP(nn.Module):
     def __init__(self, input_dim: int, hidden_dim: int):
         super().__init__()
@@ -116,6 +130,7 @@ class GravityViewMotionModel(nn.Module):
         max_detector_residual_meters: float = 0.12,
         residual_confidence_floor: float = 0.25,
         max_root_speed_mps: float = 5.0,
+        confidence_aware_visual_gating: bool = False,
     ):
         super().__init__()
         if pose_representation not in {"rotations", "detector_residual"}:
@@ -134,6 +149,7 @@ class GravityViewMotionModel(nn.Module):
         self.max_detector_residual_meters = float(max_detector_residual_meters)
         self.residual_confidence_floor = float(residual_confidence_floor)
         self.max_root_speed_mps = float(max_root_speed_mps)
+        self.confidence_aware_visual_gating = bool(confidence_aware_visual_gating)
         self.modalities = nn.ModuleDict(
             {
                 "bbox": ModalityMLP(4, hidden_dim),
@@ -179,7 +195,15 @@ class GravityViewMotionModel(nn.Module):
         tokens = self.modalities["bbox"](batch["bbox"])
         tokens = tokens + self.modalities["keypoints_2d"](batch["keypoints_2d"].flatten(-2))
         image_tokens = self.modalities["image_features"](batch["image_features"])
-        tokens = tokens + image_tokens * batch["image_mask"].unsqueeze(-1)
+        detector_confidence = (
+            batch["detector_3d_confidence"] if self.use_detector_world_3d else None
+        )
+        image_gate = visual_feature_gate(
+            batch["image_mask"],
+            detector_confidence,
+            confidence_aware=self.confidence_aware_visual_gating,
+        )
+        tokens = tokens + image_tokens * image_gate.unsqueeze(-1)
         tokens = tokens + self.modalities["camera_delta_6d"](batch["camera_delta_6d"])
         if self.use_detector_world_3d:
             detector_world = torch.cat(

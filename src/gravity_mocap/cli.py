@@ -5,6 +5,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import torch
 
@@ -12,7 +13,9 @@ from .baseline import infer_detector_baseline
 from .catalog import DatasetCatalog
 from .comparison import compare_motion_previews
 from .data import MotionWindowDataset
+from .detector_loop import detector_loop_generation_plan, generate_detector_loop_sidecar
 from .download import describe, download_dataset
+from .evaluation import diagnose_motion
 from .fixture import create_fixture
 from .inference import infer_rig
 from .losses import compute_losses
@@ -135,18 +138,24 @@ def command_fixture(args: argparse.Namespace) -> int:
 
 def command_validate(args: argparse.Namespace) -> int:
     config = load_config(args.config)
-    fixture = Path(config["data"]["root"]) / "synthetic" / "walk.npz"
-    create_fixture(fixture, frames=16, image_feature_dim=int(config["model"]["image_feature_dim"]))
-    dataset = MotionWindowDataset(
-        Path(config["data"]["root"]),
-        int(config["data"]["sequence_length"]),
-        int(config["data"]["stride"]),
-        augmentation=config["data"]["augmentation"],
-        augmentation_seed=int(config["seed"]),
-        gravity_view_contract=bool(config["data"]["gravity_view_contract"]),
-        detector_world_3d=config["data"]["detector_world_3d"],
-    )
-    batch = {name: value.unsqueeze(0) for name, value in dataset[0].items()}
+    with TemporaryDirectory(prefix="gravity-mocap-validate-") as temporary:
+        fixture_root = Path(temporary)
+        fixture = fixture_root / "synthetic" / "walk.npz"
+        create_fixture(
+            fixture,
+            frames=16,
+            image_feature_dim=int(config["model"]["image_feature_dim"]),
+        )
+        dataset = MotionWindowDataset(
+            fixture_root,
+            int(config["data"]["sequence_length"]),
+            int(config["data"]["stride"]),
+            augmentation=config["data"]["augmentation"],
+            augmentation_seed=int(config["seed"]),
+            gravity_view_contract=bool(config["data"]["gravity_view_contract"]),
+            detector_world_3d=config["data"]["detector_world_3d"],
+        )
+        batch = {name: value.unsqueeze(0) for name, value in dataset[0].items()}
     model = build_model(config).eval()
     with torch.no_grad():
         prediction = model(batch)
@@ -280,6 +289,7 @@ def command_infer_video(args: argparse.Namespace) -> int:
         force=args.force,
         preview=not args.no_preview,
         avatar_renderer=args.avatar_renderer,
+        root_motion=args.root_motion,
     )
     result["rig_2d_status"] = rig["status"]
     result["detector_status"] = rig["status"]
@@ -330,6 +340,7 @@ def command_infer_rig(args: argparse.Namespace) -> int:
         force=args.force,
         preview=args.source_video is not None and not args.no_preview,
         avatar_renderer=args.avatar_renderer,
+        root_motion=args.root_motion,
     )
     print(json.dumps(result, indent=2))
     return 0
@@ -363,6 +374,58 @@ def command_compare_previews(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_diagnose_motion(args: argparse.Namespace) -> int:
+    output = args.output or args.motion.expanduser().resolve().with_name("motion-diagnostics.json")
+    result = diagnose_motion(
+        args.motion,
+        args.rig_2d,
+        output,
+        baseline_motion_path=args.baseline_motion,
+        detector_world_3d_path=args.detector_world_3d,
+        source_video=args.source_video,
+        world_preview=args.world_preview,
+        avatar_renderer=args.avatar_renderer,
+    )
+    print(json.dumps(result, indent=2))
+    return 0
+
+
+def command_generate_detector_loop(args: argparse.Namespace) -> int:
+    plan = detector_loop_generation_plan(
+        args.source_shard,
+        args.output_root,
+        catalog_path=args.catalog,
+        data_root=DEFAULT_DATA_ROOT,
+        width=args.width,
+        height=args.height,
+    )
+    plan.update(
+        {
+            "catalog": str(args.catalog),
+            "steps": [
+                "render approved neutral motion with bundled CC0 gray avatar",
+                "run checksum-pinned MediaPipe in native VIDEO mode",
+                "align detector world-3D prior to the gravity-view target",
+                "write a source-hash-bound detector-loop sidecar",
+            ],
+        }
+    )
+    if not args.execute:
+        print(json.dumps(plan, indent=2))
+        print("DRY RUN: no frames, video, detector cache, or sidecar were created.")
+        return 0
+    sidecar = generate_detector_loop_sidecar(
+        args.source_shard,
+        args.output_root,
+        catalog_path=args.catalog,
+        data_root=DEFAULT_DATA_ROOT,
+        width=args.width,
+        height=args.height,
+    )
+    print(json.dumps({**plan, "sidecar": str(sidecar), "status": "ready"}, indent=2))
+    return 0
+
+
 def _add_video_arguments(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("video", type=Path)
     parser.add_argument("--output", type=Path)
@@ -381,6 +444,15 @@ def _add_avatar_renderer_argument(parser: argparse.ArgumentParser) -> None:
         choices=("auto", "mesh", "procedural"),
         default="auto",
         help="auto uses the bundled gray mesh when Blender is available",
+    )
+
+
+def _add_root_motion_argument(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--root-motion",
+        choices=("safe", "learned", "stationary"),
+        default="safe",
+        help="safe fails closed to stationary motion without reliable ground contacts",
     )
 
 
@@ -515,6 +587,7 @@ def build_parser() -> argparse.ArgumentParser:
     infer_rig_parser.add_argument("--force", action="store_true")
     infer_rig_parser.add_argument("--no-preview", action="store_true")
     _add_avatar_renderer_argument(infer_rig_parser)
+    _add_root_motion_argument(infer_rig_parser)
     infer_rig_parser.set_defaults(handler=command_infer_rig)
 
     infer_world_parser = subparsers.add_parser(
@@ -536,6 +609,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_video_arguments(infer)
     _add_avatar_renderer_argument(infer)
+    _add_root_motion_argument(infer)
     infer.add_argument("--checkpoint", type=Path, default=DEFAULT_INFERENCE_CHECKPOINT)
     infer.add_argument("--device", default="auto", help="auto, cpu, mps, or cuda")
     infer.set_defaults(handler=command_infer_video)
@@ -558,6 +632,40 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("output", type=Path)
     compare.add_argument("--force", action="store_true")
     compare.set_defaults(handler=command_compare_previews)
+
+    diagnostics = subparsers.add_parser(
+        "diagnose-motion",
+        help="Measure detector coverage, temporal stability, contacts, and world-root drift",
+    )
+    diagnostics.add_argument("motion", type=Path)
+    diagnostics.add_argument("--rig-2d", type=Path, required=True)
+    diagnostics.add_argument("--baseline-motion", type=Path)
+    diagnostics.add_argument("--detector-world-3d", type=Path)
+    diagnostics.add_argument("--source-video", type=Path)
+    diagnostics.add_argument("--output", type=Path)
+    diagnostics.add_argument(
+        "--world-preview",
+        action="store_true",
+        help="Render a fixed-camera view that exposes predicted root translation",
+    )
+    _add_avatar_renderer_argument(diagnostics)
+    diagnostics.set_defaults(handler=command_diagnose_motion)
+
+    detector_loop = subparsers.add_parser(
+        "generate-detector-loop",
+        help="Dry-run or build a detector-in-the-loop sidecar for one approved shard",
+    )
+    detector_loop.add_argument("source_shard", type=Path)
+    detector_loop.add_argument(
+        "--output-root",
+        type=Path,
+        default=DEFAULT_DATA_ROOT / "detector-loop",
+    )
+    detector_loop.add_argument("--catalog", type=Path, default=DEFAULT_CATALOG)
+    detector_loop.add_argument("--width", type=int, default=512)
+    detector_loop.add_argument("--height", type=int, default=512)
+    detector_loop.add_argument("--execute", action="store_true")
+    detector_loop.set_defaults(handler=command_generate_detector_loop)
     return parser
 
 
