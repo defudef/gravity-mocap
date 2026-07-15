@@ -10,6 +10,7 @@ import torch
 from .artifacts import write_json_atomic, write_npz_atomic
 from .avatar import AVATAR_RENDER_VERSION
 from .inference import _render_motion_preview
+from .mesh_avatar import AVATAR_RENDERERS, avatar_provenance, resolve_avatar_renderer
 from .rig2d import load_rig_2d
 from .rotations import rotation_6d_to_matrix
 from .schema import stable_hash
@@ -44,6 +45,7 @@ def infer_detector_baseline(
     smoothing_window: int = 5,
     force: bool = False,
     preview: bool = False,
+    avatar_renderer: str = "auto",
 ) -> dict[str, Any]:
     """Retarget detector world landmarks to the neutral skeleton without training."""
     world_path = detector_world_3d_path.expanduser().resolve()
@@ -52,6 +54,14 @@ def infer_detector_baseline(
     video = source_video.expanduser().resolve() if source_video is not None else None
     if preview and (rig_path is None or video is None):
         raise ValueError("A matching 2D rig and source video are required for baseline preview")
+    if avatar_renderer not in AVATAR_RENDERERS:
+        raise ValueError(
+            f"Unknown avatar renderer {avatar_renderer!r}; "
+            f"expected one of {', '.join(AVATAR_RENDERERS)}"
+        )
+    actual_avatar_renderer = (
+        resolve_avatar_renderer(avatar_renderer) if preview else avatar_renderer
+    )
     if video is not None and not video.is_file():
         raise ValueError(f"Video does not exist: {video}")
 
@@ -73,6 +83,8 @@ def infer_detector_baseline(
     request = {
         "detector_baseline_version": DETECTOR_BASELINE_VERSION,
         "avatar_render_version": AVATAR_RENDER_VERSION,
+        "avatar_renderer": actual_avatar_renderer,
+        "avatar_asset": (avatar_provenance() if actual_avatar_renderer == "mesh" else None),
         "detector_world_3d_sha256": file_sha256(world_path),
         "rig_2d_sha256": file_sha256(rig_path) if rig_path is not None else None,
         "smoothing_window": int(smoothing_window),
@@ -93,6 +105,7 @@ def infer_detector_baseline(
                     "motion": str(motion_path),
                     "manifest": str(manifest_path),
                     "preview": str(preview_path) if preview_path.is_file() else None,
+                    "avatar_renderer": manifest.get("avatar_renderer"),
                 }
         except (json.JSONDecodeError, OSError):
             pass
@@ -149,6 +162,7 @@ def infer_detector_baseline(
             preview_path,
             world.fps,
             avatar_title="A - MediaPipe detector baseline",
+            avatar_renderer=actual_avatar_renderer,
         )
     write_json_atomic(
         manifest_path,
@@ -164,4 +178,5 @@ def infer_detector_baseline(
         "motion": str(motion_path),
         "manifest": str(manifest_path),
         "preview": str(preview_path) if preview else None,
+        "avatar_renderer": actual_avatar_renderer,
     }

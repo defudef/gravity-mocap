@@ -1,0 +1,15 @@
+Quaternius Universal Base Characters - Standard Pack
+Superhero Male Full Body
+
+License: CC0 1.0 Universal
+License URL: https://creativecommons.org/publicdomain/zero/1.0/
+Official source: https://quaternius.com/packs/universalbasecharacters.html
+
+The bundled GLB is a transformed copy of the free Standard pack asset. Gravity
+Mocap replaces every source material with one matte gray material, removes
+textures, helper geometry, and animations, and retains the original armature
+and skin weights for neutral 22-joint preview retargeting.
+
+CC0 places the asset in the public domain to the extent permitted by law. The
+project retains this notice and machine-readable provenance for auditability,
+even though attribution is not required.
